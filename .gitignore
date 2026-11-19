@@ -1,0 +1,44 @@
+# ============ 密钥 / 环境配置（绝不入库） ============
+.env
+.env.*
+!.env.example
+*.local
+config/app.env
+config/app.*.env
+
+# ============ 依赖 ============
+node_modules/
+
+# ============ 构建产物 ============
+web/dist/
+server/dist/
+public/
+*.tsbuildinfo
+
+# ============ 运行时数据（数据库/上传/日志） ============
+pgdata/
+runtime/
+uploads/
+logs/
+*.log
+npm-debug.log*
+
+# ============ 文档 ============
+docs/
+
+# ============ 便携版打包产物 ============
+issue-tracker-win*/
+issue-tracker-linux*/
+issue-tracker-macos*/
+*.zip
+
+# ============ IDE / 系统 ============
+.idea/
+.vscode/
+!.vscode/extensions.json
+Thumbs.db
+.DS_Store
+
+# ============ 测试/覆盖 ============
+coverage/
+.nyc_output/

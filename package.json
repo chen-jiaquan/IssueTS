@@ -1,0 +1,18 @@
+{
+  "name": "issue-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "问题跟踪系统（Vue3 + Express + PostgreSQL，支持 Docker 与 Windows 部署）",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "install:all": "npm --prefix server install && npm --prefix web install",
+    "migrate": "npm --prefix server run migrate",
+    "seed": "npm --prefix server run seed",
+    "build": "npm --prefix web run build",
+    "start": "npm --prefix server run start"
+  }
+}

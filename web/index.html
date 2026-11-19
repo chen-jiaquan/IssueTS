@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>问题跟踪系统</title>
+    <script>
+      // 主题在加载前应用，避免闪烁（偏好存 localStorage）
+      document.documentElement.dataset.theme =
+        localStorage.getItem('theme') || 'ocean'
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
