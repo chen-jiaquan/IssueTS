@@ -1,16 +1,19 @@
 <script setup>
-// 基础档案设置：项目/产品/人员/字典/自定义字段/必填/通知类型/待办优先级/预警规则/角色 编辑
-// 权限：读=登录即可；写=ARCHIVE_MGR（预警规则=DASH_ALERT）；角色权限矩阵在「用户与权限」页维护
+// 基础档案设置：项目/产品/人员/字典/自定义字段/必填/通知类型/待办优先级 编辑
+// 权限：读=登录即可；写=ARCHIVE_MGR；角色/权限位/预警规则已移至「用户与权限」
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '@/components/BackHome.vue'
 import { useAuthStore } from '@/store/auth'
 import * as A from '@/api/archives'
+import {
+  exportPersonnel, personnelImportFields as fetchPersonnelImportFields,
+  readPersonnelHeaders, importPersonnel,
+} from '@/api/archives'
 import http from '@/api/http'
 
 const auth = useAuthStore()
 const canWrite = auth.has('ARCHIVE_MGR')
-const canAlert = auth.has('DASH_ALERT')
 
 const tab = ref('projects')
 const loading = ref(false)
@@ -18,31 +21,60 @@ const loading = ref(false)
 // ---------- 数据 ----------
 const projects = ref([])
 const products = ref([])
+const roles = ref([]) // 角色档案，供人员岗位下拉选择
 const personnel = ref([])
 const dictItems = ref([])
 const dictFilter = ref('')
+const dictProjectFilter = ref('') // 字典项按归属项目过滤：空=全部，选中=通用项+该项目专属项
+const personnelProjectFilter = ref('') // 人员档案按所属项目过滤：空=全部，选中=含 ALL 或该项目的人员
+const archiveProjectFilter = ref('') // 产品/自定义字段/通知类型/待办优先级的项目过滤
 const customFields = ref([])
-const requiredFields = ref([])
+const requiredFieldRules = ref([]) // [{ field_key, projects }]，projects 空数组=全局必填
 const fieldOptions = ref([]) // 问题字段清单（供必填勾选）
 const noticeTypes = ref([])
 const todoPrios = ref([])
-const alertRules = ref([])
-const roles = ref([])
-const perms = ref([])
 
 const DICT_KEYS = [
-  { key: 'project', label: '项目状态' }, { key: 'stage', label: '阶段' }, { key: 'type', label: '类型' },
+  { key: 'stage', label: '阶段' }, { key: 'type', label: '类型' },
   { key: 'module', label: '模块' }, { key: 'priority', label: '优先级' }, { key: 'impact', label: '影响程度' },
   { key: 'status', label: '状态' }, { key: 'pending_test', label: '待测试' }, { key: 'customer_test', label: '客户测试' },
 ]
 const dictLabel = (k) => DICT_KEYS.find((d) => d.key === k)?.label ?? k
+const projectLabel = (code) => (code === 'ALL' ? '全部项目' : (projects.value.find((p) => p.code === code)?.name ?? code))
+const roleLabel = (code, row) => row?.role_name || roles.value.find((r) => r.code === code)?.name || code
+// 当前用户可见的项目（前端按 scope 收敛，与后端 /archives/projects 过滤一致）
+const visibleProjects = () => projects.value.filter((p) => p.enabled !== false && (!auth.scope || auth.scope.includes(p.code)))
+// 项目多选选项（供各档案表单）；用户仅能选自己有权限的项目
+const projectMultiOptions = () => [
+  ...(auth.scope ? [] : [{ key: 'ALL', label: '全部项目（ALL）' }]),
+  ...visibleProjects().map((p) => ({ key: p.code, label: `${p.code} ${p.name}` })),
+]
+// 项目多选表单字段（复用于产品/自定义字段/通知类型/待办优先级）
+const projectsFormField = { key: 'projects', label: '所属项目', type: 'select', multiple: true,
+  options: projectMultiOptions, default: [] }
+// 系统管理员（可见全部项目）无需指定档案项目；其余用户新增/编辑档案时项目必填
+const PROJECT_FIELD_KEYS = ['projects', 'project_code']
+const requireArchiveProject = () => auth.scope !== null
+const fieldRequired = (f, editingRow) => {
+  if (PROJECT_FIELD_KEYS.includes(f.key)) return requireArchiveProject()
+  return !!f.required && !editingRow
+}
+const fieldEmpty = (v) => v === '' || v == null || (Array.isArray(v) && v.length === 0)
+// 按档案 projects 数组过滤（空=不过滤；选中=projects 含该项目或 ALL）
+const filterByArchiveProject = (rows) => {
+  const code = archiveProjectFilter.value
+  if (!code) return rows
+  return rows.filter((r) => Array.isArray(r.projects) && (r.projects.includes(code) || r.projects.includes('ALL')))
+}
 
 async function loadAll() {
   loading.value = true
   try {
-    const [cfg, req] = await Promise.all([http.get('/config/fields'), A.getRequiredFields()])
-    fieldOptions.value = cfg.fields.filter((f) => !['track', 'custom_fields', 'image_url'].includes(f.key))
-    requiredFields.value = req
+    const [cfg, req] = await Promise.all([http.get('/config/fields', { params: { scope: 1 } }), A.getRequiredFieldRules()])
+    // 固定字段 + 启用的自定义字段都可配置为必填；排除虚拟字段
+    fieldOptions.value = [...cfg.fields, ...(cfg.customFields || []).map((f) => ({ ...f, custom: true }))]
+      .filter((f) => !['track', 'custom_fields', 'image_url'].includes(f.key))
+    requiredFieldRules.value = req
     // 登录即可读的档案
     const done = await Promise.all([
       A.listProjects(), A.listProducts(), A.listPersonnel(), A.listDictItems(),
@@ -50,11 +82,7 @@ async function loadAll() {
     ])
     ;[projects.value, products.value, personnel.value, dictItems.value,
       customFields.value, noticeTypes.value, todoPrios.value] = done
-    // 管理员专属：角色/权限位/预警规则
-    if (canWrite) {
-      ;[roles.value, perms.value] = await Promise.all([A.listRoles(), http.get('/archives/permissions')])
-    }
-    if (canAlert) alertRules.value = await A.listAlertRules()
+    if (canWrite) roles.value = await A.listRoles()
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -62,6 +90,93 @@ async function loadAll() {
   }
 }
 onMounted(loadAll)
+
+// ---------- 人员档案导入/导出 ----------
+const exportBusy = ref(false)
+const importDialog = ref(false)
+const importBusy = ref(false)
+const importFile = ref(null)
+const importFieldsList = ref([])
+const importHeaders = ref([])
+const importMapping = reactive({})
+const importResult = ref(null)
+
+async function doPersonnelExport() {
+  exportBusy.value = true
+  try {
+    const blob = await exportPersonnel()
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `人员档案-${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.click()
+    URL.revokeObjectURL(a.href)
+    ElMessage.success('导出完成')
+  } catch (e) {
+    ElMessage.error(`导出失败：${e.message}`)
+  } finally {
+    exportBusy.value = false
+  }
+}
+
+async function openPersonnelImport() {
+  importFile.value = null
+  importHeaders.value = []
+  Object.keys(importMapping).forEach((k) => delete importMapping[k])
+  importResult.value = null
+  importDialog.value = true
+  try {
+    if (!importFieldsList.value.length) importFieldsList.value = await fetchPersonnelImportFields()
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function pickPersonnelFile(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) return
+  importBusy.value = true
+  importResult.value = null
+  try {
+    const d = await readPersonnelHeaders(file)
+    importFile.value = file
+    importHeaders.value = d.headers
+    for (const f of importFieldsList.value) {
+      const exact = d.headers.find((h) => h.label === f.label)
+      const guess = exact || d.headers.find((h) => h.label.includes(f.label) || f.label.includes(h.label))
+      importMapping[f.key] = guess?.label || ''
+    }
+  } catch (err) {
+    ElMessage.error(err.message)
+  } finally {
+    importBusy.value = false
+  }
+}
+
+async function doPersonnelImport() {
+  const missing = importFieldsList.value.filter((f) => ['code', 'name'].includes(f.key) && !importMapping[f.key])
+  if (missing.length) {
+    ElMessage.warning(`必填列未映射：${missing.map((f) => f.label).join('、')}`)
+    return
+  }
+  if (!importFile.value) return ElMessage.warning('请先选择 Excel 文件')
+  importBusy.value = true
+  try {
+    importResult.value = await importPersonnel(importFile.value, { ...importMapping })
+    await loadAll()
+  } catch (err) {
+    const body = err.body || {}
+    importResult.value = {
+      message: err.message,
+      imported: 0,
+      failed: (body.failUrl || body.details?.failUrl) ? '全部' : 0,
+      errors: body.details?.errors || body.errors || [],
+      failUrl: body.failUrl || body.details?.failUrl || null,
+    }
+  } finally {
+    importBusy.value = false
+  }
+}
 
 // ---------- 通用编辑对话框 ----------
 const dialog = ref(false)
@@ -83,12 +198,14 @@ function openDialog(tabCfg, row = null) {
 
 async function saveDialog() {
   for (const f of cfg.value.form) {
-    if (f.required && !editing.value && (form[f.key] === '' || form[f.key] == null)) {
+    // 项目字段：非系统管理员新增/编辑都必须选；其它必填字段仅新增时校验（保持原行为）
+    const required = PROJECT_FIELD_KEYS.includes(f.key) ? requireArchiveProject() : (f.required && !editing.value)
+    if (required && fieldEmpty(form[f.key])) {
       return ElMessage.warning(`${f.label} 必填`)
     }
   }
   const payload = {}
-  for (const f of cfg.value.form) payload[f.key] = form[f.key] === '' ? null : form[f.key]
+  for (const f of cfg.value.form) payload[f.key] = (form[f.key] === '' && !f.keepEmpty) ? null : form[f.key]
   saving.value = true
   try {
     if (editing.value) await cfg.value.api.update(editing.value, payload)
@@ -114,56 +231,103 @@ async function removeRow(tabCfg, row) {
   }
 }
 
+async function toggleArchive(tabCfg, row) {
+  const next = row.enabled === false
+  const name = row[tabCfg.nameKey] ?? row[tabCfg.rowKey]
+  try {
+    await ElMessageBox.confirm(`确认${next ? '启用' : '禁用'}「${name}」？${next ? '启用后可在单据中选择。' : '禁用后将不能在单据中选择。'}`,
+      next ? '启用' : '禁用', { type: 'warning' })
+    await tabCfg.api.update(row, { [tabCfg.rowKey]: row[tabCfg.rowKey], enabled: next })
+    ElMessage.success(`已${next ? '启用' : '禁用'}`)
+    await tabCfg.reload()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(e.message || e)
+  }
+}
+
 // ---------- 各档案配置 ----------
 const colorCell = (key) => ({
   key, label: '颜色', width: 90,
   render: (row) => (row[key] ? { color: row[key] } : null),
 })
+const enabledCol = {
+  key: 'enabled', label: '状态', width: 90,
+  render: (row) => ({ text: row.enabled === false ? '已禁用' : '启用' }),
+}
+const presetCol = {
+  key: 'preset', label: '系统预置', width: 100,
+  render: (row) => ({ text: row.preset ? '是' : '否' }),
+}
+const enabledForm = { key: 'enabled', label: '启用', type: 'switch', default: true }
+const presetForm = { key: 'preset', label: '系统预置', type: 'switch', default: false }
 
 const projectCfg = computed(() => ({
   rowKey: 'code', nameKey: 'name',
   rows: projects.value, reload: async () => { projects.value = await A.listProjects() },
   cols: [
     { key: 'code', label: '编码', width: 130 }, { key: 'name', label: '名称', width: 200 },
-    { key: 'note', label: '备注' }, colorCell('color'),
+    { key: 'note', label: '备注' }, colorCell('color'), enabledCol, presetCol,
   ],
   form: [
     { key: 'code', label: '编码', required: true, disabledOnEdit: true },
     { key: 'name', label: '名称' }, { key: 'note', label: '备注', type: 'textarea' },
-    { key: 'color', label: '颜色', type: 'color' },
+    { key: 'color', label: '颜色', type: 'color' }, enabledForm, presetForm,
   ],
   api: { create: A.createProject, update: (row, d) => A.updateProject(row.code, d), del: (row) => A.deleteProject(row.code) },
 }))
 
 const productCfg = computed(() => ({
   rowKey: 'code', nameKey: 'code',
-  rows: products.value, reload: async () => { products.value = await A.listProducts() },
-  cols: [{ key: 'code', label: '编码', width: 130 }, { key: 'note', label: '备注' }, colorCell('color')],
+  rows: filterByArchiveProject(products.value), reload: async () => { products.value = await A.listProducts() },
+  cols: [{ key: 'code', label: '编码', width: 130 }, { key: 'note', label: '备注' },
+    { key: 'projects', label: '所属项目', minWidth: 180, render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    colorCell('color'), enabledCol, presetCol],
   form: [
     { key: 'code', label: '编码', required: true, disabledOnEdit: true },
     { key: 'note', label: '备注', type: 'textarea' }, { key: 'color', label: '颜色', type: 'color' },
+    projectsFormField, enabledForm, presetForm,
   ],
   api: { create: A.createProduct, update: (row, d) => A.updateProduct(row.code, d), del: (row) => A.deleteProduct(row.code) },
 }))
 
+const personnelFiltered = computed(() => {
+  const code = personnelProjectFilter.value
+  if (!code) return personnel.value
+  // 所属项目含 ALL（全部项目）或包含所选项目的人员才显示
+  return personnel.value.filter((p) => Array.isArray(p.projects) && (p.projects.includes('ALL') || p.projects.includes(code)))
+})
 const personnelCfg = computed(() => ({
   rowKey: 'code', nameKey: 'name',
-  rows: personnel.value, reload: async () => { personnel.value = await A.listPersonnel() },
+  rows: personnelFiltered.value, reload: async () => { personnel.value = await A.listPersonnel() },
   cols: [
     { key: 'code', label: '编码', width: 110 }, { key: 'name', label: '姓名', width: 130 },
-    { key: 'role', label: '岗位', width: 130 }, { key: 'group', label: '所属组' }, colorCell('color'),
+    { key: 'role', label: '岗位', width: 130, render: (row) => ({ text: roleLabel(row.role, row) }) }, { key: 'group', label: '所属组' },
+    { key: 'projects', label: '所属项目', minWidth: 200,
+      render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    enabledCol, presetCol,
   ],
   form: [
     { key: 'code', label: '编码', required: true, disabledOnEdit: true },
     { key: 'name', label: '姓名', required: true },
-    { key: 'role', label: '岗位' }, { key: 'group', label: '所属组' },
-    { key: 'color', label: '颜色', type: 'color' },
+    { key: 'role', label: '岗位', type: 'select',
+      options: () => {
+        const opts = roles.value.map((r) => ({ key: r.code, label: r.name }))
+        if (form.role && !opts.some((o) => o.key === form.role)) opts.unshift({ key: form.role, label: roleLabel(form.role) })
+        return opts
+      } },
+    { key: 'group', label: '所属组' },
+    { key: 'projects', label: '所属项目', type: 'select', multiple: true, default: [], options: projectMultiOptions },
+    enabledForm, presetForm,
   ],
   api: { create: A.createPersonnel, update: (row, d) => A.updatePersonnel(row.code, d), del: (row) => A.deletePersonnel(row.code) },
 }))
 
-const dictFiltered = computed(() =>
-  dictItems.value.filter((d) => !dictFilter.value || d.dict_key === dictFilter.value))
+const dictFiltered = computed(() => dictItems.value.filter((d) => {
+  if (dictFilter.value && d.dict_key !== dictFilter.value) return false
+  // 项目过滤：归属为空（通用）始终显示；专属项仅在选中其归属项目时显示
+  if (dictProjectFilter.value && d.project_code && d.project_code !== dictProjectFilter.value) return false
+  return true
+}))
 const dictCfg = computed(() => ({
   rowKey: 'id', nameKey: 'value',
   rows: dictFiltered.value, reload: async () => { dictItems.value = await A.listDictItems() },
@@ -171,107 +335,95 @@ const dictCfg = computed(() => ({
     { key: 'dict_key', label: '字典', width: 110, render: (row) => ({ text: dictLabel(row.dict_key) }) },
     { key: 'value', label: '值', width: 120 }, { key: 'label', label: '显示名', width: 140 },
     { key: 'product_code', label: '所属产品', width: 110 },
-    { key: 'note', label: '备注' }, { key: 'sort', label: '排序', width: 70 }, colorCell('color'),
+    { key: 'project_code', label: '归属项目', width: 120,
+      render: (row) => ({ text: row.project_code ? projectLabel(row.project_code) : '全部项目' }) },
+    { key: 'note', label: '备注' }, { key: 'sort', label: '排序', width: 70 }, colorCell('color'), enabledCol, presetCol,
   ],
   form: [
     { key: 'dict_key', label: '字典', type: 'select', options: DICT_KEYS, required: true, disabledOnEdit: true },
     { key: 'value', label: '值', required: true },
     { key: 'label', label: '显示名' },
-    { key: 'product_code', label: '所属产品', type: 'select', options: () => products.value.map((p) => ({ key: p.code, label: p.code })), showIf: (f) => form.dict_key === 'module' },
+    { key: 'product_code', label: '所属产品', type: 'select', options: () => products.value.filter((p) => p.enabled !== false).map((p) => ({ key: p.code, label: p.code })), showIf: (f) => form.dict_key === 'module' },
+    { key: 'project_code', label: '归属项目', type: 'select', keepEmpty: true, default: '',
+      options: () => [{ key: '', label: '全部项目（通用）' }, ...visibleProjects().map((p) => ({ key: p.code, label: `${p.code} ${p.name}` }))] },
     { key: 'note', label: '备注', type: 'textarea' },
     { key: 'sort', label: '排序', type: 'number', default: 0 },
-    { key: 'color', label: '颜色', type: 'color' },
+    { key: 'color', label: '颜色', type: 'color' }, enabledForm, presetForm,
   ],
   api: { create: A.createDictItem, update: (row, d) => A.updateDictItem(row.id, d), del: (row) => A.deleteDictItem(row.id) },
 }))
 
 const customCfg = computed(() => ({
   rowKey: 'key', nameKey: 'label',
-  rows: customFields.value, reload: async () => { customFields.value = await A.listCustomFields() },
+  rows: filterByArchiveProject(customFields.value), reload: async () => { customFields.value = await A.listCustomFields() },
   cols: [
     { key: 'key', label: '字段键', width: 130 }, { key: 'label', label: '列名', width: 180 },
     { key: 'type', label: '类型', width: 120, render: (row) => ({ text: { text: '单行', textarea: '多行', number: '数字', date: '日期' }[row.type] }) },
+    { key: 'projects', label: '所属项目', minWidth: 180, render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    enabledCol, presetCol,
   ],
   form: [
-    { key: 'key', label: '字段键', required: true, disabledOnEdit: true, default: `cf_${customFields.value.length + 1}` },
+    { key: 'key', label: '字段键', required: true, disabled: true,
+      default: `cf_${Math.max(0, ...customFields.value.map((f) => Number(String(f.key).match(/^cf_(\d+)$/)?.[1] || 0))) + 1}` },
     { key: 'label', label: '列名', required: true },
     { key: 'type', label: '类型', type: 'select', required: true, default: 'text',
       options: [{ key: 'text', label: '单行' }, { key: 'textarea', label: '多行' }, { key: 'number', label: '数字' }, { key: 'date', label: '日期' }] },
+    projectsFormField, enabledForm, presetForm,
   ],
   api: { create: A.createCustomField, update: (row, d) => A.updateCustomField(row.key, d), del: (row) => A.deleteCustomField(row.key) },
 }))
 
 const noticeTypeCfg = computed(() => ({
   rowKey: 'id', nameKey: 'name',
-  rows: noticeTypes.value, reload: async () => { noticeTypes.value = await A.listNoticeTypes() },
-  cols: [{ key: 'id', label: 'ID', width: 80 }, { key: 'name', label: '类型名', width: 220 }],
-  form: [{ key: 'name', label: '类型名', required: true }],
-  api: { create: A.createNoticeType, update: (row, d) => A.updateNoticeType(row.id, d.name), del: (row) => A.deleteNoticeType(row.id) },
+  rows: filterByArchiveProject(noticeTypes.value), reload: async () => { noticeTypes.value = await A.listNoticeTypes() },
+  cols: [{ key: 'id', label: 'ID', width: 80 }, { key: 'name', label: '类型名', width: 220 },
+    { key: 'projects', label: '所属项目', minWidth: 180, render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    enabledCol, presetCol],
+  form: [{ key: 'name', label: '类型名', required: true }, projectsFormField, enabledForm, presetForm],
+  api: { create: A.createNoticeType, update: (row, d) => A.updateNoticeType(row.id, d), del: (row) => A.deleteNoticeType(row.id) },
 }))
 
 const todoPrioCfg = computed(() => ({
   rowKey: 'code', nameKey: 'code',
-  rows: todoPrios.value, reload: async () => { todoPrios.value = await A.listTodoPrios() },
-  cols: [{ key: 'code', label: '编码', width: 100 }, { key: 'label', label: '说明', width: 260 }],
+  rows: filterByArchiveProject(todoPrios.value), reload: async () => { todoPrios.value = await A.listTodoPrios() },
+  cols: [{ key: 'code', label: '编码', width: 100 }, { key: 'label', label: '说明', width: 260 },
+    { key: 'projects', label: '所属项目', minWidth: 180, render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    enabledCol, presetCol],
   form: [
     { key: 'code', label: '编码', type: 'select', required: true, disabledOnEdit: true,
       options: [{ key: 'C', label: 'C 关键' }, { key: 'H', label: 'H 高' }, { key: 'M', label: 'M 中' }, { key: 'L', label: 'L 低' }] },
-    { key: 'label', label: '说明' },
+    { key: 'label', label: '说明' }, projectsFormField, enabledForm, presetForm,
   ],
   api: { create: A.createTodoPrio, update: (row, d) => A.updateTodoPrio(row.code, d), del: (row) => A.deleteTodoPrio(row.code) },
 }))
 
-const roleCfg = computed(() => ({
-  rowKey: 'code', nameKey: 'name',
-  rows: roles.value, reload: async () => { roles.value = await A.listRoles() },
-  cols: [
-    { key: 'code', label: '编码', width: 100 }, { key: 'name', label: '角色名', width: 140 },
-    { key: 'desc', label: '描述' },
-    { key: 'external', label: '外部角色', width: 100, render: (row) => ({ text: row.external ? '是' : '否' }) },
-    colorCell('color'),
-  ],
-  form: [
-    { key: 'code', label: '编码', required: true, disabledOnEdit: true },
-    { key: 'name', label: '角色名', required: true },
-    { key: 'desc', label: '描述', type: 'textarea' },
-    { key: 'external', label: '外部角色', type: 'switch' },
-    { key: 'color', label: '颜色', type: 'color' },
-  ],
-  api: { create: A.createRole, update: (row, d) => A.updateRole(row.code, d), del: (row) => A.deleteRole(row.code) },
+// 各 tab 配置（解包 computed，供模板 v-for 使用）
+const CFGS = computed(() => ({
+  projects: projectCfg.value, products: productCfg.value, personnel: personnelCfg.value,
+  dict: dictCfg.value, custom: customCfg.value, 'notice-types': noticeTypeCfg.value,
+  'todo-prios': todoPrioCfg.value,
 }))
 
-// 各 tab 配置（解包 computed，供模板 v-for 使用）
-// 各 tab 配置（解包 computed；角色 tab 仅 ARCHIVE_MGR 可见）
-const CFGS = computed(() => {
-  const map = {
-    projects: projectCfg.value, products: productCfg.value, personnel: personnelCfg.value,
-    dict: dictCfg.value, custom: customCfg.value, 'notice-types': noticeTypeCfg.value,
-    'todo-prios': todoPrioCfg.value,
-  }
-  if (canWrite) map.roles = roleCfg.value
-  return map
-})
-
-// ---------- 预警规则（行内编辑） ----------
-async function saveAlertRule(row) {
-  try {
-    await A.putAlertRule({ key: row.key, enabled: !!row.enabled, days: row.days === '' ? null : Number(row.days) })
-    ElMessage.success(`规则「${row.label}」已保存`)
-  } catch (e) {
-    ElMessage.error(e.message)
-  }
-}
-
-// ---------- 必填字段 ----------
+// ---------- 必填字段（支持按项目区分） ----------
 const reqDirty = ref(false)
+const ruleOf = (key) => requiredFieldRules.value.find((r) => r.field_key === key)
+const isRequired = (key) => !!ruleOf(key)
+const requiredProjects = (key) => ruleOf(key)?.projects || []
 function toggleRequired(key, checked) {
-  if (checked) requiredFields.value.push(key)
-  else requiredFields.value = requiredFields.value.filter((f) => f !== key)
+  if (checked) {
+    if (!ruleOf(key)) requiredFieldRules.value.push({ field_key: key, projects: [] })
+  } else {
+    requiredFieldRules.value = requiredFieldRules.value.filter((r) => r.field_key !== key)
+  }
   reqDirty.value = true
+}
+function setRequiredProjects(key, projects) {
+  const rule = ruleOf(key)
+  if (rule) { rule.projects = projects || []; reqDirty.value = true }
 }
 async function saveRequired() {
   try {
-    await A.putRequiredFields(requiredFields.value)
+    await A.putRequiredFields(requiredFieldRules.value)
     ElMessage.success('必填字段配置已保存')
     reqDirty.value = false
   } catch (e) {
@@ -280,6 +432,30 @@ async function saveRequired() {
 }
 
 const fieldLabelOf = (key) => fieldOptions.value.find((f) => f.key === key)?.label ?? key
+
+// 必填字段按业务类型分组展示
+const REQ_GROUPS = [
+  { label: '基础信息', desc: '归属项目与需求描述', color: '#409eff', keys: ['project', 'desc'] },
+  { label: '分类字典', desc: '阶段、类型、模块、优先级等下拉项', color: '#67c23a',
+    keys: ['stage', 'type', 'module', 'priority', 'impact', 'status', 'pending_test', 'customer_test'] },
+  { label: '相关人员', desc: '提出人、负责人、开发人员', color: '#e6a23c', keys: ['reporter', 'owner', 'developer'] },
+  { label: '日期时间', desc: '各业务时间节点', color: '#9b59b6',
+    keys: ['reported_at', 'plan_start', 'plan_end', 'resolved_at', 'customer_test_done'] },
+  { label: '方案说明', desc: '开发方案等文本', color: '#f56c6c', keys: ['solution'] },
+]
+const groupedFieldOptions = computed(() => {
+  const groups = REQ_GROUPS.map((g) => ({ ...g, fields: [] }))
+  const custom = { label: '自定义字段', desc: '档案中扩展的字段', color: '#1abc9c', fields: [] }
+  const other = { label: '其他字段', desc: '', color: '#909399', fields: [] }
+  for (const f of fieldOptions.value) {
+    const g = groups.find((x) => x.keys.includes(f.key))
+    if (g) g.fields.push(f)
+    else if (String(f.key).startsWith('cf_')) custom.fields.push(f)
+    else other.fields.push(f)
+  }
+  return [...groups, custom, other].filter((g) => g.fields.length)
+})
+const requiredCountIn = (group) => group.fields.filter((f) => isRequired(f.key)).length
 </script>
 
 <template>
@@ -293,16 +469,29 @@ const fieldLabelOf = (key) => fieldOptions.value.find((f) => f.key === key)?.lab
 
     <el-tabs v-model="tab" v-loading="loading" style="margin-top:10px">
       <!-- 通用表格型档案 -->
-      <el-tab-pane v-for="(c, key) in CFGS" :key="key" :label="{ projects: '项目', products: '产品', personnel: '人员', dict: '字典', custom: '自定义字段', 'notice-types': '通知类型', 'todo-prios': '待办优先级', roles: '角色' }[key]" :name="key">
+      <el-tab-pane v-for="(c, key) in CFGS" :key="key" :label="{ projects: '项目', products: '产品', personnel: '人员', dict: '字典', custom: '自定义字段', 'notice-types': '通知类型', 'todo-prios': '待办优先级' }[key]" :name="key">
         <div class="toolbar">
           <el-select v-if="key === 'dict'" v-model="dictFilter" clearable placeholder="按字典类型过滤" style="width:180px">
             <el-option v-for="d in DICT_KEYS" :key="d.key" :value="d.key" :label="d.label" />
           </el-select>
+          <el-select v-if="key === 'dict'" v-model="dictProjectFilter" clearable placeholder="按归属项目过滤" style="width:180px">
+            <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
+          </el-select>
+          <el-select v-if="['products', 'custom', 'notice-types', 'todo-prios'].includes(key)"
+            v-model="archiveProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px">
+            <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
+          </el-select>
           <el-button v-if="canWrite" type="primary" size="small" @click="openDialog(c)">新增</el-button>
-          <span v-if="key === 'roles'" class="tip">角色权限分配在「用户与权限」页维护</span>
+          <el-select v-if="key === 'personnel'" v-model="personnelProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px">
+            <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
+          </el-select>
+          <template v-if="key === 'personnel' && canWrite">
+            <el-button size="small" :loading="exportBusy" @click="doPersonnelExport">导出 Excel</el-button>
+            <el-button size="small" @click="openPersonnelImport">导入 Excel</el-button>
+          </template>
         </div>
-        <el-table :data="c.rows" size="small" border stripe>
-          <el-table-column v-for="col in c.cols" :key="col.key" :prop="col.key" :label="col.label" :width="col.width">
+        <el-table :data="c.rows" size="small" border stripe max-height="calc(100vh - 230px)">
+          <el-table-column v-for="col in c.cols" :key="col.key" :prop="col.key" :label="col.label" :width="col.width" :min-width="col.minWidth">
             <template #default="{ row }">
               <el-tag v-if="col.render && col.render(row)?.color" size="small"
                 :style="{ color: col.render(row).color, borderColor: col.render(row).color, backgroundColor: col.render(row).color + '22' }">
@@ -312,9 +501,11 @@ const fieldLabelOf = (key) => fieldOptions.value.find((f) => f.key === key)?.lab
               <span v-else>{{ row[col.key] ?? '' }}</span>
             </template>
           </el-table-column>
-          <el-table-column v-if="canWrite" label="操作" width="130" fixed="right">
+          <el-table-column v-if="canWrite" label="操作" width="190" fixed="right">
             <template #default="{ row }">
               <el-button link size="small" type="primary" @click="openDialog(c, row)">编辑</el-button>
+              <el-button link size="small" :type="row.enabled === false ? 'success' : 'warning'"
+                @click="toggleArchive(c, row)">{{ row.enabled === false ? '启用' : '禁用' }}</el-button>
               <el-button link size="small" type="danger" @click="removeRow(c, row)">删除</el-button>
             </template>
           </el-table-column>
@@ -324,66 +515,105 @@ const fieldLabelOf = (key) => fieldOptions.value.find((f) => f.key === key)?.lab
       <!-- 必填字段 -->
       <el-tab-pane label="必填字段" name="required">
         <div class="toolbar">
-          <span class="tip">登记/编辑问题时的必填项；默认 project/desc/priority/status</span>
+          <span class="tip">按字段类型分组；勾选即必填，可选项目范围（不选=所有项目必填）</span>
+          <el-tag size="small" type="info" effect="plain">已选 {{ requiredFieldRules.length }} / {{ fieldOptions.length }}</el-tag>
           <el-button v-if="canWrite" type="primary" size="small" :disabled="!reqDirty" @click="saveRequired">保存配置</el-button>
         </div>
-        <el-checkbox-group style="display:flex; flex-wrap:wrap; gap:6px 18px">
-          <el-checkbox v-for="f in fieldOptions" :key="f.key"
-            :model-value="requiredFields.includes(f.key)" :disabled="!canWrite"
-            @change="(v) => toggleRequired(f.key, v)">{{ f.key }} {{ f.label }}</el-checkbox>
-        </el-checkbox-group>
-      </el-tab-pane>
-
-      <!-- 预警规则 -->
-      <el-tab-pane v-if="canAlert" label="预警规则" name="alerts">
-        <div class="toolbar"><span class="tip">启用后规则在首页工作台「预警事项」实时生效；custTest 的天数为已解决后未完成客户测试的容忍天数</span></div>
-        <el-table :data="alertRules" size="small" border>
-          <el-table-column prop="key" label="规则键" width="120" />
-          <el-table-column prop="label" label="说明" min-width="240" />
-          <el-table-column label="启用" width="80">
-            <template #default="{ row }"><el-switch v-model="row.enabled" :disabled="!canAlert" @change="saveAlertRule(row)" /></template>
-          </el-table-column>
-          <el-table-column label="阈值(天)" width="130">
-            <template #default="{ row }">
-              <el-input-number v-if="row.key === 'custTest'" v-model="row.days" :min="1" :max="90" size="small"
-                :disabled="!canAlert" @change="saveAlertRule(row)" />
-              <span v-else class="tip">—</span>
-            </template>
-          </el-table-column>
-        </el-table>
-      </el-tab-pane>
-
-      <!-- 权限位（只读，ARCHIVE_MGR） -->
-      <el-tab-pane v-if="canWrite" label="权限位" name="perms">
-        <div class="toolbar"><span class="tip">权限分配矩阵在「用户与权限」页维护</span></div>
-        <el-table :data="perms" size="small" border stripe>
-          <el-table-column prop="code" label="编码" width="150" />
-          <el-table-column prop="module" label="模块" width="120" />
-          <el-table-column prop="name" label="名称" width="200" />
-          <el-table-column prop="desc" label="描述" />
-        </el-table>
+        <div class="req-groups">
+          <section v-for="g in groupedFieldOptions" :key="g.label" class="req-group" :style="{ '--grp': g.color }">
+            <header class="req-group-hd">
+              <span class="req-group-bar" />
+              <span class="req-group-title">{{ g.label }}</span>
+              <span class="req-group-desc">{{ g.desc }}</span>
+              <span class="req-group-count">{{ requiredCountIn(g) }}/{{ g.fields.length }}</span>
+            </header>
+            <div class="req-group-body">
+              <div v-for="f in g.fields" :key="f.key" class="req-field-row">
+                <el-checkbox :model-value="isRequired(f.key)" :disabled="!canWrite"
+                  @change="(v) => toggleRequired(f.key, v)">
+                  <span class="req-field-label">{{ f.label }}</span>
+                  <span class="req-field-key">{{ f.key }}</span>
+                </el-checkbox>
+                <el-select v-if="isRequired(f.key)" class="req-field-projects" multiple collapse-tags clearable
+                  :model-value="requiredProjects(f.key)" :disabled="!canWrite"
+                  placeholder="所有项目（全局必填）" @update:model-value="(v) => setRequiredProjects(f.key, v)">
+                  <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
+                </el-select>
+              </div>
+            </div>
+          </section>
+        </div>
       </el-tab-pane>
     </el-tabs>
 
     <!-- 通用编辑对话框 -->
-    <el-dialog v-model="dialog" :title="(editing ? '编辑' : '新增') + ({ projects: '项目', products: '产品', personnel: '人员', dict: '字典项', custom: '自定义字段', 'notice-types': '通知类型', 'todo-prios': '待办优先级', roles: '角色' }[tab] ?? '')" width="480px">
+    <el-dialog v-model="dialog" :title="(editing ? '编辑' : '新增') + ({ projects: '项目', products: '产品', personnel: '人员', dict: '字典项', custom: '自定义字段', 'notice-types': '通知类型', 'todo-prios': '待办优先级' }[tab] ?? '')" width="480px">
       <el-form label-width="90px">
         <template v-for="f in cfg?.form ?? []" :key="f.key">
-          <el-form-item v-if="!f.showIf || f.showIf(f)" :label="f.label" :required="f.required && !editing">
+          <el-form-item v-if="!f.showIf || f.showIf(f)" :label="f.label"
+            :required="PROJECT_FIELD_KEYS.includes(f.key) ? requireArchiveProject() : (f.required && !editing)">
             <el-color-picker v-if="f.type === 'color'" v-model="form[f.key]" />
             <el-switch v-else-if="f.type === 'switch'" v-model="form[f.key]" />
             <el-input-number v-else-if="f.type === 'number'" v-model="form[f.key]" style="width:100%" />
-            <el-select v-else-if="f.type === 'select'" v-model="form[f.key]" style="width:100%" :disabled="f.disabledOnEdit && !!editing">
+            <el-select v-else-if="f.type === 'select'" v-model="form[f.key]" style="width:100%" :multiple="!!f.multiple"
+              :collapse-tags="!!f.multiple" :disabled="f.disabledOnEdit && !!editing">
               <el-option v-for="o in (typeof f.options === 'function' ? f.options() : f.options)" :key="o.key" :value="o.key" :label="o.label" />
             </el-select>
-            <el-input v-else-if="f.type === 'textarea'" v-model="form[f.key]" type="textarea" :rows="2" />
-            <el-input v-else v-model="form[f.key]" :disabled="f.disabledOnEdit && !!editing" />
+            <el-input v-else-if="f.type === 'textarea'" v-model="form[f.key]" type="textarea" :rows="2" :disabled="!!f.disabled" />
+            <el-input v-else v-model="form[f.key]" :disabled="!!f.disabled || (f.disabledOnEdit && !!editing)" />
           </el-form-item>
         </template>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveDialog">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 人员档案 Excel 导入 -->
+    <el-dialog v-model="importDialog" title="人员档案导入 Excel" width="720px" destroy-on-close>
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+        title="先选择文件并确认字段对照，再导入；按人员编码新增或更新，成功后会自动下推用户" />
+      <div class="toolbar">
+        <input ref="personnelXlsxInput" type="file" accept=".xlsx,.xls" style="display:none" @change="pickPersonnelFile" />
+        <el-button :loading="importBusy" @click="$refs.personnelXlsxInput.click()">选择 Excel 文件</el-button>
+        <span v-if="importFile" class="tip">{{ importFile.name }}（{{ importHeaders.length }} 列）</span>
+      </div>
+      <template v-if="importHeaders.length">
+        <div class="imp-title">字段对照（人员编码、姓名必填）</div>
+        <el-table :data="importFieldsList" size="small" border max-height="320">
+          <el-table-column label="系统字段" width="140">
+            <template #default="{ row }">
+              <span>{{ row.label }}</span>
+              <span v-if="['code', 'name'].includes(row.key)" style="color:#e6a23c"> *</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Excel 列">
+            <template #default="{ row }">
+              <el-select v-model="importMapping[row.key]" clearable filterable placeholder="不导入" style="width:100%">
+                <el-option v-for="h in importHeaders" :key="h.col" :value="h.label" :label="`${h.label}（第${h.col}列）`" />
+              </el-select>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div style="margin-top:12px; text-align:right">
+          <el-button type="primary" :loading="importBusy" @click="doPersonnelImport">开始导入</el-button>
+        </div>
+      </template>
+      <template v-if="importResult">
+        <el-alert :type="importResult.failed ? 'warning' : 'success'" :closable="false" show-icon
+          style="margin-top:14px"
+          :title="importResult.message || `导入完成：成功 ${importResult.imported} 条，失败 ${importResult.failed} 条`" />
+        <div v-if="importResult.message" class="tip" style="margin-top:4px">
+          成功 {{ importResult.imported }} 条，失败 {{ importResult.failed }} 条
+        </div>
+        <div v-if="importResult.errors?.length" class="imp-errors">
+          <div v-for="(e, i) in importResult.errors.slice(0, 10)" :key="i">第 {{ e.row }} 行 · {{ e.field }}：{{ e.message }}</div>
+          <div v-if="importResult.errors.length > 10" class="tip">仅显示前 10 条，完整信息见失败清单</div>
+        </div>
+        <div v-if="importResult.failUrl" style="margin-top:10px">
+          <el-button tag="a" :href="importResult.failUrl" download type="primary" plain>下载失败记录 Excel</el-button>
+        </div>
       </template>
     </el-dialog>
   </div>
@@ -393,4 +623,21 @@ const fieldLabelOf = (key) => fieldOptions.value.find((f) => f.key === key)?.lab
 .hd { display: flex; align-items: center; gap: 16px; }
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .tip { font-size: 12px; color: var(--el-text-color-secondary); }
+.imp-title { font-weight: 600; margin: 6px 0 8px; }
+.imp-errors { margin-top: 10px; padding: 8px 10px; background: var(--el-fill-color-light); font-size: 12px; line-height: 1.8; }
+/* 必填字段：按类型分组卡片 */
+.req-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.req-group { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; overflow: hidden; background: var(--el-bg-color); }
+.req-group-hd { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: var(--el-fill-color-light); }
+.req-group-bar { width: 4px; height: 15px; border-radius: 2px; background: var(--grp); flex: none; }
+.req-group-title { font-weight: 600; font-size: 14px; }
+.req-group-desc { font-size: 12px; color: var(--el-text-color-secondary); flex: 1; }
+.req-group-count { font-size: 12px; color: var(--el-text-color-secondary); }
+.req-group-body { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.req-group-body .el-checkbox { margin-right: 0; height: 24px; }
+.req-field-row { display: flex; align-items: center; gap: 12px; }
+.req-field-row > .el-checkbox { flex: none; min-width: 160px; }
+.req-field-projects { flex: 1; }
+.req-field-label { font-size: 13px; }
+.req-field-key { margin-left: 6px; font-size: 11px; color: var(--el-text-color-placeholder); font-family: monospace; }
 </style>

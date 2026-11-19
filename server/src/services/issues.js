@@ -26,6 +26,45 @@ const norm = (v) => {
 }
 
 const toIn = (v) => String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+
+// ---------- 单据写入时校验档案是否启用（历史值保持不变则允许） ----------
+const PERSON_ARCHIVE_KEYS = ['reporter', 'owner', 'developer']
+const DICT_ARCHIVE_KEYS = ['stage', 'type', 'module', 'priority', 'impact', 'status', 'pending_test', 'customer_test']
+
+async function assertArchiveEnabled(sql, params, label) {
+  const { rows } = await pool.query(`SELECT enabled FROM ${sql} WHERE ${params.where}`, params.values)
+  if (rows.length && rows[0].enabled === false) {
+    throw new HttpError(400, ERR.VALIDATION, `${label}档案已禁用，不能选择`, [{ field: params.field }])
+  }
+}
+
+export async function assertIssueArchivesEnabled(body, old = null) {
+  for (const key of PERSON_ARCHIVE_KEYS) {
+    const value = body[key]
+    if (!value || (old && norm(old[key]) === norm(value))) continue
+    await assertArchiveEnabled('personnel', {
+      where: 'name=$1', values: [value], field: key,
+    }, FIELD_LABELS[key])
+  }
+  if (body.project && (!old || norm(old.project) !== norm(body.project))) {
+    await assertArchiveEnabled('projects', { where: 'code=$1', values: [body.project], field: 'project' }, FIELD_LABELS.project)
+  }
+  const project = body.project ?? old?.project
+  for (const key of DICT_ARCHIVE_KEYS) {
+    const value = body[key]
+    if (!value || (old && norm(old[key]) === norm(value))) continue
+    const { rows } = await pool.query(
+      'SELECT enabled, project_code FROM dict_items WHERE dict_key=$1 AND value=$2', [key, value])
+    if (rows.length && rows[0].enabled === false) {
+      throw new HttpError(400, ERR.VALIDATION, `${FIELD_LABELS[key]}档案已禁用，不能选择`, [{ field: key }])
+    }
+    if (rows.length && rows[0].project_code && project && rows[0].project_code !== project) {
+      throw new HttpError(400, ERR.VALIDATION,
+        `${FIELD_LABELS[key]}「${value}」仅适用于项目 ${rows[0].project_code}，不能用于 ${project}`, [{ field: key }])
+    }
+  }
+}
+
 // 表头筛选：空值选项的特殊标记（前后端约定；前端显示为「空值」）
 export const EMPTY_MARK = '__EMPTY__'
 // 多值筛选条件：支持空值标记 → col IS NULL / col = ''
@@ -59,6 +98,21 @@ function buildIssueWhere(query, scope) {
   // 日期列：pg DATE 与文本数组比较需转 text（与前端 YYYY-MM-DD 值一致）
   for (const key of ['reported_at', 'plan_start', 'plan_end', 'resolved_at', 'customer_test_done']) {
     if (query[key] !== undefined && query[key] !== '') addMultiFilter(whereClauses, params, key, query[key], true)
+  }
+  // 统计报表期间过滤：按所选时间字段映射列，起止闭区间（倒置时自动交换）
+  const rangeCol = { planEnd: 'plan_end', resolvedAt: 'resolved_at' }[query.timeField]
+  if (rangeCol && (query.dateFrom || query.dateTo)) {
+    let from = query.dateFrom
+    let to = query.dateTo
+    if (from && to && from > to) [from, to] = [to, from]
+    if (from) {
+      params.push(from)
+      whereClauses.push(`${rangeCol} >= $${params.length}::date`)
+    }
+    if (to) {
+      params.push(to)
+      whereClauses.push(`${rangeCol} <= $${params.length}::date`)
+    }
   }
   // 序号 / 描述列：精确多选（描述列来自当前页取值，含空值选项）
   for (const key of ['seq', 'desc']) {
@@ -171,6 +225,7 @@ export async function getIssueBySeq(seq, scope) {
 
 // ---------- 新增（留痕 __create__） ----------
 export async function createIssue(body, user) {
+  await assertIssueArchivesEnabled(body)
   const seqRow = await pool.query('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM issues')
   const seq = seqRow.rows[0].next
   const cols = ISSUE_FIELDS.filter((k) => body[k] !== undefined)
@@ -189,8 +244,9 @@ export async function createIssue(body, user) {
 }
 
 // ---------- 编辑（字段级留痕） ----------
-export async function updateIssue(seq, body, user) {
-  const old = await getIssueBySeq(seq, null) // scope 由路由层校验
+export async function updateIssue(seq, body, user, scope) {
+  const old = await getIssueBySeq(seq, scope)
+  await assertIssueArchivesEnabled(body, old)
   const changed = ISSUE_FIELDS.filter((k) => body[k] !== undefined && norm(old[k]) !== norm(body[k]))
   if (!changed.length) return { issue: old, changed: [] }
 
@@ -242,11 +298,11 @@ export async function batchDelete(seqs, scope) {
 }
 
 // ---------- 批量修改（逐行留痕） ----------
-export async function batchUpdate(seqs, patch, user) {
+export async function batchUpdate(seqs, patch, user, scope) {
   const results = []
   for (const seq of seqs) {
     try {
-      const r = await updateIssue(seq, patch, user)
+      const r = await updateIssue(seq, patch, user, scope)
       results.push({ seq, ok: true, changed: r.changed.map((k) => FIELD_LABELS[k] ?? k) })
     } catch (e) {
       results.push({ seq, ok: false, message: e.message })
@@ -256,23 +312,24 @@ export async function batchUpdate(seqs, patch, user) {
 }
 
 // ---------- 行内分配（+ 自动生成通知） ----------
-export async function assign(seq, field, value, user) {
-  const issue = await getIssueBySeq(seq, null)
+export async function assign(seq, field, value, user, scope) {
+  const issue = await getIssueBySeq(seq, scope)
   if (norm(issue[field]) === norm(value)) return { issue, notice: null }
+  await assertIssueArchivesEnabled({ [field]: value }, issue)
   const { rows } = await pool.query(
     `UPDATE issues SET ${field} = $2, updated_at = now() WHERE id = $1 RETURNING *`, [issue.id, value])
   await pool.query(
     'INSERT INTO issue_logs(issue_id, issue_seq, changed_by, field_key, field_label, before_value, after_value) VALUES ($1,$2,$3,$4,$5,$6,$7)',
     [issue.id, seq, user.username, field, FIELD_LABELS[field], norm(issue[field]), value])
-  // 通知：类型取 notice_types 首项
-  const nt = await pool.query('SELECT name FROM notice_types ORDER BY id LIMIT 1')
+  // 通知：类型取启用的 notice_types 首项，项目与接收人取自当前问题
+  const nt = await pool.query('SELECT name FROM notice_types WHERE enabled=true ORDER BY id LIMIT 1')
   const nRow = await pool.query(
-    `INSERT INTO notices(id, type, title, content, date, pinned, created_by)
-     VALUES ($1,$2,$3,$4,CURRENT_DATE,false,$5) RETURNING id`,
+    `INSERT INTO notices(id, type, title, content, date, pinned, created_by, projects, recipients, "groups")
+     VALUES ($1,$2,$3,$4,CURRENT_DATE,false,$5,ARRAY[$6]::text[],ARRAY[$7]::text[],'{}'::text[]) RETURNING id`,
     [`a${Date.now()}`, nt.rows[0]?.name ?? '通知',
      `问题 #${seq} 分配了${FIELD_LABELS[field]}给你`,
      `「${String(issue.desc).slice(0, 30)}」已分配：${value}（由 ${user.username} 操作）`,
-     user.username])
+     user.username, issue.project, value])
   return { issue: rows[0], notice: nRow.rows[0] }
 }
 
@@ -283,11 +340,12 @@ export const logsOfIssue = (seq) =>
     [seq]).then((r) => r.rows)
 
 // ---------- 全局日志查询（筛选+分页） ----------
-export async function queryLogs(query) {
+export async function queryLogs(query, scope) {
   const page = query.page ?? 1
   const pageSize = query.pageSize ?? 50
   const where = []
   const params = []
+  if (scope) { params.push(scope); where.push(`i.project = ANY($${params.length}::text[])`) }
   const add = (sql, ...vals) => { params.push(...vals); where.push(sql.replace('?', `$${params.length}`)) }
   if (query.by) add('l.changed_by = ?', query.by)
   if (query.field) add('l.field_key = ?', query.field)

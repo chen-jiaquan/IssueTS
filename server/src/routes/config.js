@@ -2,12 +2,15 @@
 import { Router } from 'express'
 import { asyncHandler } from '../middleware/error.js'
 import { authRequired, loadProfile } from '../middleware/auth.js'
+import { attachScope } from '../middleware/scope.js'
 import { hasPerm } from '../middleware/rbac.js'
 import { validate } from '../middleware/validate.js'
 import { pool } from '../db/pool.js'
 import { ok } from '../utils/resp.js'
-import { issueExportLimitRules } from '../schemas/config.js'
-import { getIssueExportLimit, setIssueExportLimit } from '../services/settings.js'
+import { issueExportLimitRules, defaultUserPasswordRules } from '../schemas/config.js'
+import {
+  getIssueExportLimit, setIssueExportLimit, getDefaultUserPassword, setDefaultUserPassword,
+} from '../services/settings.js'
 
 const router = Router()
 router.use(authRequired)
@@ -59,20 +62,62 @@ router.get('/theme-options', asyncHandler(async (_req, res) => ok(res, THEME_OPT
 router.get('/stat-dims', asyncHandler(async (_req, res) => ok(res, STAT_DIMS)))
 
 // 系统设置（SECURITY_MGR）：问题导出上限，0=不限制
-router.get('/settings/issue-export-limit', loadProfile, hasPerm('SECURITY_MGR'),
-  asyncHandler(async (_req, res) => ok(res, await getIssueExportLimit())))
-router.put('/settings/issue-export-limit', loadProfile, hasPerm('SECURITY_MGR'),
+router.get('/settings/issue-export-limit', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+  asyncHandler(async (req, res) => ok(res, await getIssueExportLimit(req.query.project))))
+router.put('/settings/issue-export-limit', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
   issueExportLimitRules, validate,
-  asyncHandler(async (req, res) => ok(res, await setIssueExportLimit(req.body.value))))
+  asyncHandler(async (req, res) => ok(res,
+    await setIssueExportLimit(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
+
+// 系统设置（SECURITY_MGR）：人员下推用户时的初始密码
+router.get('/settings/default-user-password', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+  asyncHandler(async (req, res) => ok(res, await getDefaultUserPassword(req.query.project))))
+router.put('/settings/default-user-password', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+  defaultUserPasswordRules, validate,
+  asyncHandler(async (req, res) => ok(res,
+    await setDefaultUserPassword(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
 
 // COLS/FIELDS/字典/人员（前端渲染表单与表头的数据源，一次拉全）
-router.get('/fields', asyncHandler(async (_req, res) => {
+// scope=1：首页等场景只返回当前用户可见项目及对应人员
+router.get('/fields', loadProfile, attachScope, asyncHandler(async (req, res) => {
+  const scoped = req.query.scope === '1'
+  const scope = scoped ? req.scope : null
+  // scope=null 不过滤；scope=[] 不可见任何项目专属数据（通用项仍可见）；数组=按项目过滤
+  const arrCond = (col, idx = 1) => scope === null ? '' : (scope.length ? `AND ${col} = ANY($${idx}::text[])` : 'AND FALSE')
+  const overlapCond = (col, idx = 1) => scope === null ? '' : (scope.length ? `AND ${col} && $${idx}::text[]` : 'AND FALSE')
+  const sp = scope && scope.length ? [scope] : []
   const dict = await pool.query(
-    'SELECT dict_key, value, label, color, note, product_code FROM dict_items ORDER BY dict_key, sort, id')
-  const personnel = await pool.query('SELECT code, name, role, "group", color FROM personnel ORDER BY code')
+    `SELECT dict_key, value, label, color, note, product_code, project_code FROM dict_items
+     WHERE enabled = true ${scope === null ? '' : (scope.length ? "AND (project_code='' OR project_code = ANY($1::text[]))" : "AND project_code=''")}
+     ORDER BY dict_key, sort, id`, sp)
+  const personnel = await pool.query(
+    `SELECT p.code, p.name, p.role, r.name AS role_name, p."group", p.color, p.projects
+     FROM personnel p LEFT JOIN roles r ON r.code = p.role
+     WHERE p.enabled = true
+       ${scope === null ? '' : (scope.length ? "AND (p.projects ? 'ALL' OR p.projects ?| $1::text[])" : 'AND FALSE')}
+     ORDER BY p.code`, sp)
+  const projects = await pool.query(
+    `SELECT code, name, color FROM projects WHERE enabled = true ${arrCond('code')}
+     ORDER BY code`, sp)
+  const products = await pool.query(
+    `SELECT code, note, color, projects FROM products WHERE enabled = true ${overlapCond('projects')}
+     ORDER BY code`, sp)
+  const customFields = await pool.query(
+    `SELECT key, label, type, projects FROM custom_fields WHERE enabled = true ${overlapCond('projects')}
+     ORDER BY key`, sp)
+  const noticeTypes = await pool.query(
+    `SELECT id, name, projects FROM notice_types WHERE enabled = true ${overlapCond('projects')}
+     ORDER BY id`, sp)
+  const todoPrios = await pool.query(
+    `SELECT code, label, projects FROM todo_prios WHERE enabled = true ${overlapCond('projects')}
+     ORDER BY code`, sp)
   const grouped = {}
   for (const r of dict.rows) (grouped[r.dict_key] ??= []).push(r)
-  ok(res, { cols: COLS, fields: FIELDS, dicts: grouped, personnel: personnel.rows })
+  ok(res, {
+    cols: COLS, fields: FIELDS, customFields: customFields.rows,
+    dicts: grouped, personnel: personnel.rows, projects: projects.rows,
+    products: products.rows, noticeTypes: noticeTypes.rows, todoPrios: todoPrios.rows,
+  })
 }))
 
 // 功能与字段说明（只读聚合，随配置自动更新的对照清单）

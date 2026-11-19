@@ -5,7 +5,7 @@ import { validate } from '../middleware/validate.js'
 import { authRequired, loadProfile } from '../middleware/auth.js'
 import { hasPerm } from '../middleware/rbac.js'
 import { attachScope } from '../middleware/scope.js'
-import { pivotRules } from '../schemas/stats.js'
+import { pivotRules, exportPivotBody } from '../schemas/stats.js'
 import { pivot, exportPivot } from '../services/stats.js'
 import { ok } from '../utils/resp.js'
 
@@ -15,9 +15,9 @@ router.use(authRequired, loadProfile)
 router.get('/pivot', hasPerm('ISSUE_VIEW'), pivotRules, validate, attachScope,
   asyncHandler(async (req, res) => ok(res, await pivot(req.query, req.scope))))
 
-router.get('/export', hasPerm('DATA_EXPORT'), pivotRules, validate, attachScope,
+router.post('/export', hasPerm('DATA_EXPORT'), exportPivotBody, validate, attachScope,
   asyncHandler(async (req, res) => {
-    const buf = await exportPivot(req.query, req.scope)
+    const buf = await exportPivot(req.body.filters || {}, req.scope, req.body.charts || [])
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="stats-${Date.now()}.xlsx"`)
     res.send(buf)

@@ -1,6 +1,6 @@
 <script setup>
 // 问题跟踪列表页：筛选 / 表格 / 分页 / 新增编辑 / 详情 / 日志 / 批量 / 分配
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Filter } from '@element-plus/icons-vue'
@@ -20,13 +20,28 @@ const route = useRoute()
 const { isMobile } = useBreakpoint()
 
 // ---------- 元数据（字典/人员/必填字段） ----------
-const meta = ref({ dicts: {}, personnel: [], fields: [], required: [] })
+const meta = ref({ dicts: {}, personnel: [], projects: [], fields: [], customFields: [], required: [] })
 const dictOf = (key) => meta.value.dicts[key] ?? []
-const personOptions = computed(() => meta.value.personnel.map((p) => p.name))
-const fieldLabel = (key) => meta.value.fields.find((f) => f.key === key)?.label ?? key
+const projectOptions = computed(() => meta.value.projects ?? [])
+const PERSON_KEYS = ['reporter', 'owner', 'developer']
+const allPersonOptions = computed(() => meta.value.personnel.map((p) => p.name))
+const personOptionsFor = (project) => {
+  if (!project) return []
+  return meta.value.personnel
+    .filter((p) => Array.isArray(p.projects) && (p.projects.includes('ALL') || p.projects.includes(project)))
+    .map((p) => p.name)
+}
+const customFields = computed(() => meta.value.customFields ?? [])
+const isCustomField = (key) => String(key).startsWith('cf_') && customFields.value.some((f) => f.key === key)
+const fieldLabel = (key) =>
+  meta.value.fields.find((f) => f.key === key)?.label
+  ?? customFields.value.find((f) => f.key === key)?.label
+  ?? key
 
 const tagStyle = (dictKey, val) => {
-  const item = dictOf(dictKey).find((d) => d.value === val)
+  const item = dictKey === 'project'
+    ? projectOptions.value.find((p) => p.code === val)
+    : dictOf(dictKey).find((d) => d.value === val)
   if (!item) return {}
   return { color: item.color, borderColor: item.color, backgroundColor: item.color + '22' }
 }
@@ -54,7 +69,7 @@ const FILTER_KEYS = [
 const blankFilters = () => Object.fromEntries(FILTER_KEYS.map((k) => [k, []]))
 const query = reactive({ page: 1, pageSize: 50, q: '', ...blankFilters() })
 // 下钻提示（值已并入 query，extra 仅用于展示提示条）
-const extra = reactive({ developer: '', module: '', type: '', overdue: '' })
+const extra = reactive({ developer: '', module: '', type: '', overdue: '', drill: '' })
 const selected = ref([])
 // 表格锁定：'' 不锁定 / 'header' 仅锁定表头 / 'both' 表头+左右列都锁定（偏好存本地）
 const lockMode = ref(localStorage.getItem('issue_lock_mode') ?? '')
@@ -67,10 +82,59 @@ function setLockMode(val) {
   localStorage.setItem('issue_lock_mode', val ?? '')
 }
 
+// ---------- 列表字段显示顺序（拖拽表头，存本地） ----------
+const COLUMN_ORDER_KEY = 'issue_column_order'
+const columnOrder = ref((() => {
+  try { return JSON.parse(localStorage.getItem(COLUMN_ORDER_KEY) || '[]') } catch { return [] }
+})())
+function saveColumnOrder(order) {
+  columnOrder.value = order
+  localStorage.setItem(COLUMN_ORDER_KEY, JSON.stringify(order))
+}
+function resetColumnOrder() {
+  saveColumnOrder([])
+  ElMessage.success('列顺序已恢复默认')
+}
+let dragSrcKey = null
+const keyFromTh = (th) => [...(th?.classList || [])].find((c) => c.startsWith('col-key-'))?.slice(8) || null
+function bindColumnDrag() {
+  nextTick(() => {
+    const ths = tableRef.value?.$el?.querySelectorAll('.el-table__header-wrapper th[class*="col-key-"]')
+    if (!ths) return
+    ths.forEach((th) => {
+      if (th.dataset.dragBound) return
+      th.dataset.dragBound = '1'
+      th.draggable = true
+      th.title = '拖拽调整列顺序'
+      th.addEventListener('dragstart', (e) => {
+        dragSrcKey = keyFromTh(th)
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', dragSrcKey || '')
+      })
+      th.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' })
+      th.addEventListener('drop', (e) => {
+        e.preventDefault()
+        const dstKey = keyFromTh(th)
+        if (!dragSrcKey || !dstKey || dragSrcKey === dstKey) return
+        const keys = columns.value.map((c) => c.key).filter((k) => k !== dragSrcKey)
+        const at = keys.indexOf(dstKey)
+        if (at < 0) return
+        keys.splice(at, 0, dragSrcKey)
+        saveColumnOrder(keys)
+        dragSrcKey = null
+      })
+      th.addEventListener('dragend', () => { dragSrcKey = null })
+    })
+  })
+}
+
 const filterParams = () => {
   const p = { page: query.page, pageSize: query.pageSize }
   if (query.q) p.q = query.q
   for (const k of FILTER_KEYS) if (query[k].length) p[k] = query[k].join(',')
+  if (query.timeField) p.timeField = query.timeField
+  if (query.dateFrom) p.dateFrom = query.dateFrom
+  if (query.dateTo) p.dateTo = query.dateTo
   if (extra.overdue) p.overdue = '1'
   return p
 }
@@ -108,8 +172,8 @@ function applyPageSize() {
 }
 function search() { query.page = 1; load() }
 function reset() {
-  Object.assign(query, { page: 1, q: '', ...blankFilters() })
-  Object.assign(extra, { developer: '', module: '', type: '', overdue: '' })
+  Object.assign(query, { page: 1, q: '', timeField: '', dateFrom: '', dateTo: '', ...blankFilters() })
+  Object.assign(extra, { developer: '', module: '', type: '', overdue: '', drill: '' })
   load()
 }
 
@@ -142,19 +206,27 @@ const columns = computed(() => {
     { key: 'pending_test', dict: 'pending_test' }, { key: 'status', dict: 'status' },
     { key: 'resolved_at' }, { key: 'customer_test', dict: 'customer_test' },
     { key: 'customer_test_done' },
+    ...customFields.value.map((f) => ({ key: f.key, custom: true })),
   ]
   const mobileKeys = ['project', 'desc', 'priority', 'status', 'owner']
-  return (isMobile.value ? full.filter((c) => mobileKeys.includes(c.key)) : full)
+  const all = isMobile.value ? full.filter((c) => mobileKeys.includes(c.key)) : full
+  // 按本地保存的顺序排列；不在顺序中的列（如新增自定义字段）按默认位置排在其后
+  const order = columnOrder.value
+  if (!order.length) return all
+  const rank = (k) => { const i = order.indexOf(k); return i < 0 ? order.length : i }
+  return [...all].sort((a, b) => rank(a.key) - rank(b.key))
 })
+watch(columns, bindColumnDrag)
 
 // Excel 式筛选：候选值来自全量数据去重（后端 filter-options），跨页可选；含已选项保证勾选不丢
 // 后端对该列存在 NULL/空串时追加 EMPTY_MARK，前端显示为「空值」（序号/项目/需求描述列不提供筛选）
 const EMPTY_MARK = '__EMPTY__'
 
-// 日期列：Excel 式年→月→日级联筛选；最终仍以 YYYY-MM-DD 交给后端过滤
-const DATE_CASCADER_PROPS = { multiple: true, checkStrictly: true, emitPath: false, expandTrigger: 'click' }
+// 日期列：单列树筛选，年/月/日逐级展开；勾选父节点自动选中全部子节点
+const DATE_TREE_PROPS = { label: 'label', children: 'children' }
 const dateFilterVisible = reactive({})
 const dateFilterDrafts = reactive({})
+const dateTreeRefs = {}
 
 const dateFilterTrees = computed(() => {
   const map = {}
@@ -245,8 +317,17 @@ function expandDateValues(key, values) {
   return [...result]
 }
 
-function openDateFilter(key) {
+function setDateTreeRef(key, el) {
+  if (el) dateTreeRefs[key] = el
+}
+function syncDateTree(key) {
+  const tree = dateTreeRefs[key]
+  if (tree) dateFilterDrafts[key] = tree.getCheckedKeys()
+}
+async function openDateFilter(key) {
   dateFilterDrafts[key] = [...(dateFilterModels.value[key] || [])]
+  await nextTick()
+  dateTreeRefs[key]?.setCheckedKeys(dateFilterDrafts[key] || [])
 }
 function applyDateFilter(key, values) {
   const next = expandDateValues(key, values)
@@ -257,11 +338,13 @@ function applyDateFilter(key, values) {
   load()
 }
 function confirmDateFilter(key) {
+  syncDateTree(key)
   applyDateFilter(key, dateFilterDrafts[key] || [])
   dateFilterVisible[key] = false
 }
 function clearDateFilter(key) {
   dateFilterDrafts[key] = []
+  dateTreeRefs[key]?.setCheckedKeys([])
   applyDateFilter(key, [])
   dateFilterVisible[key] = false
 }
@@ -270,7 +353,7 @@ const columnFilters = computed(() => {
   const map = {}
   for (const c of columns.value) {
     const k = c.key
-    if (k === 'project' || k === 'desc' || isDateKey(k)) continue
+    if (k === 'project' || k === 'desc' || isDateKey(k) || c.custom) continue
     // 日期候选值后端已转 YYYY-MM-DD 文本，直接截取，避免 fmtDate 的 UTC 解析错位
     const vals = new Set((filterOpts.value[k] || []).map((v) => (v === EMPTY_MARK ? v : isDateKey(k) ? String(v).slice(0, 10) : String(v))))
     for (const v of query[k] || []) vals.add(v)
@@ -299,7 +382,7 @@ const contentWidths = computed(() => {
     // 表头宽度：带筛选漏斗的列多留图标空间
     let max = textWidth(fieldLabel(c.key)) + (c.key === 'project' ? 26 : 46)
     for (const r of list.value) {
-      const v = isDateKey(c.key) ? fmtDate(r[c.key]) : r[c.key]
+      const v = c.custom ? r.custom_fields?.[c.key] : (isDateKey(c.key) ? fmtDate(r[c.key]) : r[c.key])
       max = Math.max(max, textWidth(v) + (c.dict || c.key === 'priority' ? 34 : 24))
     }
     map[c.key] = Math.min(Math.max(Math.round(max), 80), 360)
@@ -314,10 +397,38 @@ const formRef = ref()
 const form = reactive({})
 const formFields = computed(() => meta.value.fields.filter((f) => f.key !== 'track'))
 const dateFields = ['reported_at', 'plan_start', 'plan_end', 'resolved_at', 'customer_test_done']
-const optionsFor = (key) => {
-  if (['reporter', 'owner', 'developer'].includes(key)) return personOptions.value
-  return dictOf(key).map((d) => d.value)
+const withHistory = (key, options, includeHistory) => {
+  const current = includeHistory ? editing.value?.[key] : null
+  return current && !options.includes(current) ? [current, ...options] : options
 }
+const optionsFor = (key, project, includeHistory = true) => {
+  if (key === 'project') {
+    return withHistory(key, projectOptions.value.map((p) => p.code), includeHistory)
+  }
+  if (PERSON_KEYS.includes(key)) {
+    const base = project === undefined ? allPersonOptions.value : personOptionsFor(project)
+    return withHistory(key, base, includeHistory)
+  }
+  // 字典项：project_code 为空表示通用；归属项目的选项只在该项目下可见
+  const items = dictOf(key).filter((d) => !d.project_code || (project && d.project_code === project))
+  return withHistory(key, items.map((d) => d.value), includeHistory)
+}
+// 按当前项目加载必填配置（全局必填 + 该项目专属必填）
+async function loadRequiredForProject(project) {
+  try {
+    meta.value.required = await http.get('/archives/required-fields', { params: project ? { project } : {} })
+  } catch { /* 保留上一次配置 */ }
+}
+// 登记时切换项目后，清掉不属于该项目的人员/字典选择，并刷新必填配置（编辑历史数据不自动改写）
+watch(() => form.project, (project) => {
+  if (!dialog.value || editing.value) return
+  const allowed = personOptionsFor(project)
+  for (const key of PERSON_KEYS) if (form[key] && !allowed.includes(form[key])) form[key] = ''
+  for (const key of Object.keys(meta.value.dicts)) {
+    if (form[key] && !optionsFor(key, project, false).includes(form[key])) form[key] = ''
+  }
+  loadRequiredForProject(project)
+})
 // 实际完成有日期且客户测试=是 → 状态自动置为已解决（用户改动这两个字段时触发）
 function onFieldChange(key) {
   if ((key === 'resolved_at' || key === 'customer_test') && form.resolved_at && form.customer_test === '是') {
@@ -336,7 +447,9 @@ function openCreate() {
   // 单项目账号自动预填归属项目
   if (Array.isArray(auth.scope) && auth.scope.length === 1) form.project = auth.scope[0]
   form.track = []
+  form.custom_fields = Object.fromEntries(customFields.value.map((f) => [f.key, '']))
   dialog.value = true
+  loadRequiredForProject(form.project)
 }
 async function openEdit(row) {
   const d = await getIssue(row.seq)
@@ -346,15 +459,17 @@ async function openEdit(row) {
     const v = d[f.key]
     form[f.key] = dateFields.includes(f.key) ? fmtDate(v) : (v ?? '')
   }
-  form.custom_fields = d.custom_fields || {}
+  form.custom_fields = Object.fromEntries(customFields.value.map((f) => [f.key, d.custom_fields?.[f.key] ?? '']))
   form.track = Array.isArray(d.track) ? d.track : []
   dialog.value = true
+  loadRequiredForProject(form.project)
 }
 async function submitForm() {
   try {
-    // 必填校验（档案 required-fields 配置驱动）
+    // 必填校验（档案 required-fields 配置驱动，含自定义字段 cf_*）
     for (const f of meta.value.required) {
-      if (!form[f] || form[f] === '') { ElMessage.warning(`「${fieldLabel(f)}」为必填项`); return }
+      const val = isCustomField(f) ? form.custom_fields?.[f] : form[f]
+      if (!val || val === '') { ElMessage.warning(`「${fieldLabel(f)}」为必填项`); return }
     }
     const payload = { ...form }
     // 兜底：满足完成+客户测试条件时状态强制已解决
@@ -419,7 +534,7 @@ const fmtTime = (t) => String(t).slice(0, 19).replace('T', ' ')
 async function quickAssign(row, field) {
   const { value } = await ElMessageBox.prompt(`为问题 #${row.seq} 指定${fieldLabel(field)}`, '行内分配', {
     inputValue: row[field] || '',
-    inputValidator: (v) => (v && personOptions.value.includes(v)) || '请从人员档案中选择',
+    inputValidator: (v) => (v && allPersonOptions.value.includes(v)) || '请从人员档案中选择',
     autocomplete: 'off',
   })
   await assignIssue(row.seq, field, value)
@@ -558,18 +673,20 @@ async function doImport() {
 
 onMounted(async () => {
   const [cfg, required] = await Promise.all([
-    http.get('/config/fields'),
+    http.get('/config/fields', { params: { scope: 1 } }),
     http.get('/archives/required-fields'),
   ])
   meta.value.dicts = cfg.dicts
   meta.value.personnel = cfg.personnel
+  meta.value.projects = cfg.projects || []
   meta.value.fields = cfg.fields
+  meta.value.customFields = cfg.customFields || []
   meta.value.required = required
 
   // 统计/工作台下钻参数
   const qs = route.query
   if (qs.q) query.q = String(qs.q)
-  for (const k of ['project', 'status', 'priority', 'owner']) {
+  for (const k of ['project', 'status', 'priority', 'owner', 'stage', 'plan_end', 'resolved_at']) {
     if (qs[k]) query[k] = String(qs[k]).split(',')
   }
   for (const k of ['developer', 'module', 'type']) {
@@ -578,9 +695,17 @@ onMounted(async () => {
       query[k] = [String(qs[k])]
     }
   }
+  // 统计报表穿透：时间字段 + 期间（与 FILTERABLE 日期多选叠加）
+  if (qs.timeField) query.timeField = String(qs.timeField)
+  if (qs.dateFrom) query.dateFrom = String(qs.dateFrom)
+  if (qs.dateTo) query.dateTo = String(qs.dateTo)
+  if (qs.timeField || qs.dateFrom || qs.dateTo) {
+    extra.drill = `${qs.timeField === 'resolvedAt' ? '实际完成' : '预计完成'} ${qs.dateFrom || ''} ~ ${qs.dateTo || ''}`
+  }
   if (qs.overdue) extra.overdue = '1'
 
   await load()
+  bindColumnDrag()
   if (qs.seq) openDetail({ seq: Number(qs.seq) })
 })
 </script>
@@ -591,7 +716,7 @@ onMounted(async () => {
     <div class="toolbar">
       <BackHome />
       <el-select v-model="query.project" multiple collapse-tags placeholder="项目" clearable style="width: 170px">
-        <el-option v-for="d in dictOf('project')" :key="d.value" :value="d.value" :label="d.value" />
+        <el-option v-for="p in projectOptions" :key="p.code" :value="p.code" :label="p.code + ' ' + p.name" />
       </el-select>
       <el-button @click="search">查询</el-button>
       <el-input v-model="query.q" placeholder="搜索描述/方案" clearable style="width: 220px" @keyup.enter="search" />
@@ -604,6 +729,9 @@ onMounted(async () => {
       <el-button :disabled="!auth.has('ISSUE_DELETE') || !selected.length" @click="removeSelected">
         批量删除（{{ selected.length }}）
       </el-button>
+      <el-tooltip content="拖拽表头可调整列顺序，顺序会保存在本地" placement="bottom">
+        <el-button v-if="columnOrder.length" size="small" @click="resetColumnOrder">恢复默认列序</el-button>
+      </el-tooltip>
       <el-tooltip content="锁定表头：滚动时表头固定；锁定行列：表头与首尾列同时固定" placement="bottom">
         <el-select v-model="lockMode" style="margin-left:auto; width: 130px" @change="setLockMode">
           <el-option label="不锁定" value="" />
@@ -614,10 +742,10 @@ onMounted(async () => {
     </div>
 
     <!-- 下钻筛选提示 -->
-    <el-alert v-if="extra.overdue || extra.developer || extra.module || extra.type" type="info" :closable="false"
+    <el-alert v-if="extra.overdue || extra.developer || extra.module || extra.type || extra.drill" type="info" :closable="false"
       style="margin-bottom:10px; padding:4px 12px">
       <span style="font-size:12px">
-        下钻筛选：{{ extra.overdue ? '逾期未关闭' : '' }}{{ extra.developer ? ` 开发人员=${extra.developer}` : '' }}{{ extra.module ? ` 模块=${extra.module}` : '' }}{{ extra.type ? ` 类型=${extra.type}` : '' }}
+        下钻筛选：{{ extra.overdue ? '逾期未关闭' : '' }}{{ extra.developer ? ` 开发人员=${extra.developer}` : '' }}{{ extra.module ? ` 模块=${extra.module}` : '' }}{{ extra.type ? ` 类型=${extra.type}` : '' }}{{ extra.drill ? ` 统计穿透（${extra.drill}）` : '' }}
         <el-button link type="primary" size="small" @click="reset">清除</el-button>
       </span>
     </el-alert>
@@ -679,27 +807,28 @@ onMounted(async () => {
       <template v-for="(c, i) in columns" :key="c.key">
         <!-- 项目列：无筛选漏斗（过滤在工具栏），锁定行列时左侧固定 -->
         <el-table-column v-if="c.key === 'project'" :prop="c.key" :label="fieldLabel(c.key)"
-          :min-width="contentWidths.project" :fixed="colFixed(i)">
+          :label-class-name="`col-key-${c.key}`" :min-width="contentWidths.project" :fixed="colFixed(i)">
           <template #default="{ row }">
             <el-tag v-if="row[c.key]" size="small" :style="tagStyle('project', row[c.key])">{{ row[c.key] }}</el-tag>
           </template>
         </el-table-column>
-        <!-- 日期列：Excel 式年→月→日级联筛选 -->
+        <!-- 日期列：单列树筛选，通过 + 逐级展开；父节点勾选默认全选下级 -->
         <el-table-column v-else-if="isDateKey(c.key)" :prop="c.key" :label="fieldLabel(c.key)"
-          :min-width="contentWidths[c.key] ?? 110" :fixed="colFixed(i)">
+          :label-class-name="`col-key-${c.key}`" :min-width="contentWidths[c.key] ?? 110" :fixed="colFixed(i)">
           <template #header>
             <div class="date-filter-header">
               <span>{{ fieldLabel(c.key) }}</span>
               <el-popover v-model:visible="dateFilterVisible[c.key]" trigger="click" placement="bottom-start"
-                :width="560" popper-class="date-filter-popover" @show="openDateFilter(c.key)">
+                :width="300" popper-class="date-filter-popover" @show="openDateFilter(c.key)">
                 <template #reference>
                   <el-icon class="date-filter-icon"><Filter /></el-icon>
                 </template>
                 <div class="date-filter-panel">
                   <div class="date-filter-title">按日期筛选 · {{ fieldLabel(c.key) }}</div>
-                  <el-cascader-panel :options="dateFilterTrees[c.key] || []" :props="DATE_CASCADER_PROPS"
-                    :model-value="dateFilterDrafts[c.key] || []"
-                    @change="(v) => dateFilterDrafts[c.key] = v" />
+                  <el-tree :ref="(el) => setDateTreeRef(c.key, el)" :data="dateFilterTrees[c.key] || []"
+                    node-key="value" :props="DATE_TREE_PROPS" show-checkbox :check-strictly="false"
+                    :expand-on-click-node="false" :check-on-click-node="true" :height="260"
+                    @check-change="() => syncDateTree(c.key)" />
                   <div class="date-filter-actions">
                     <el-button size="small" @click="clearDateFilter(c.key)">清空</el-button>
                     <el-button type="primary" size="small" @click="confirmDateFilter(c.key)">确定</el-button>
@@ -713,12 +842,13 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <!-- 其他列：普通 Excel 式多选筛选 -->
-        <el-table-column v-else :prop="c.key" :label="fieldLabel(c.key)" :min-width="contentWidths[c.key] ?? (c.key === 'desc' ? 200 : 110)"
+        <el-table-column v-else :prop="c.key" :label="fieldLabel(c.key)" :label-class-name="`col-key-${c.key}`"
+          :min-width="contentWidths[c.key] ?? (c.key === 'desc' ? 200 : 110)"
           :fixed="colFixed(i)" :filters="columnFilters[c.key]" :filtered-value="query[c.key]" :filter-method="() => true">
           <template #default="{ row }">
             <el-tag v-if="c.dict && row[c.key]" size="small" :style="tagStyle(c.dict, row[c.key])">{{ row[c.key] }}</el-tag>
             <el-tag v-else-if="c.key === 'priority'" size="small" :type="prioTagType(row.priority)">{{ row.priority }}</el-tag>
-            <span v-else>{{ row[c.key] }}</span>
+            <span v-else>{{ c.custom ? (row.custom_fields?.[c.key] ?? '') : row[c.key] }}</span>
           </template>
         </el-table-column>
       </template>
@@ -764,15 +894,30 @@ onMounted(async () => {
         <el-row :gutter="12">
           <el-col v-for="f in formFields" :key="f.key" :span="['desc', 'solution'].includes(f.key) ? 24 : 8">
             <el-form-item :label="f.label" :required="meta.required.includes(f.key)">
-              <el-select v-if="optionsFor(f.key).length" v-model="form[f.key]" filterable allow-create clearable
-                :placeholder="f.label" style="width: 100%" @change="onFieldChange(f.key)">
-                <el-option v-for="o in optionsFor(f.key)" :key="o" :value="o" :label="o" />
+              <el-select v-if="PERSON_KEYS.includes(f.key) || optionsFor(f.key, form.project).length"
+                v-model="form[f.key]" filterable :allow-create="!PERSON_KEYS.includes(f.key)" clearable
+                :placeholder="PERSON_KEYS.includes(f.key) && !form.project ? '请先选择项目' : f.label"
+                style="width: 100%" @change="onFieldChange(f.key)">
+                <el-option v-for="o in optionsFor(f.key, form.project)" :key="o" :value="o" :label="o" />
               </el-select>
               <el-date-picker v-else-if="dateFields.includes(f.key)" v-model="form[f.key]" type="date"
                 value-format="YYYY-MM-DD" style="width: 100%" @change="onFieldChange(f.key)" />
               <el-input v-else-if="['desc', 'solution'].includes(f.key)" v-model="form[f.key]" type="textarea"
                 :rows="f.key === 'desc' ? 2 : 2" />
               <el-input v-else v-model="form[f.key]" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <!-- 自定义字段：随档案定义动态渲染，值存入 custom_fields -->
+        <el-row v-if="customFields.length" :gutter="12" style="margin-top:4px">
+          <el-col v-for="f in customFields" :key="f.key" :span="f.type === 'textarea' ? 24 : 8">
+            <el-form-item :label="f.label" :required="meta.required.includes(f.key)">
+              <el-input v-if="f.type === 'textarea'" v-model="form.custom_fields[f.key]" type="textarea" :rows="2" />
+              <el-input-number v-else-if="f.type === 'number'" v-model="form.custom_fields[f.key]" :controls="false" style="width:100%" />
+              <el-date-picker v-else-if="f.type === 'date'" v-model="form.custom_fields[f.key]" type="date"
+                value-format="YYYY-MM-DD" style="width:100%" />
+              <el-input v-else v-model="form.custom_fields[f.key]" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -800,6 +945,9 @@ onMounted(async () => {
         <el-descriptions :column="2" size="small" border>
           <el-descriptions-item v-for="f in formFields" :key="f.key" :label="f.label">
             {{ isDateKey(f.key) ? fmtDate(detail[f.key]) : detail[f.key] }}
+          </el-descriptions-item>
+          <el-descriptions-item v-for="f in customFields" :key="f.key" :label="f.label">
+            {{ detail.custom_fields?.[f.key] ?? '' }}
           </el-descriptions-item>
         </el-descriptions>
         <h4>跟踪记录</h4>
@@ -839,8 +987,8 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="目标值">
-          <el-select v-if="optionsFor(batchField).length" v-model="batchValue" filterable style="width: 100%">
-            <el-option v-for="o in optionsFor(batchField)" :key="o" :value="o" :label="o" />
+          <el-select v-if="optionsFor(batchField, undefined, false).length" v-model="batchValue" filterable style="width: 100%">
+            <el-option v-for="o in optionsFor(batchField, undefined, false)" :key="o" :value="o" :label="o" />
           </el-select>
           <el-date-picker v-else-if="dateFields.includes(batchField)" v-model="batchValue" type="date" value-format="YYYY-MM-DD" style="width: 100%" />
           <el-input v-else v-model="batchValue" />
@@ -856,6 +1004,8 @@ onMounted(async () => {
 
 <style scoped>
 .toolbar { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
+:deep(th[draggable='true']) { cursor: grab; }
+:deep(th[draggable='true']:active) { cursor: grabbing; }
 /* 分页固定在浏览器视口右下角，随窗口自适应 */
 .pager {
   position: fixed;
@@ -891,6 +1041,24 @@ h4 { margin: 16px 0 8px; }
 <style>
 .date-filter-popover .date-filter-panel { padding: 4px; }
 .date-filter-popover .date-filter-title { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 8px; }
-.date-filter-popover .el-cascader-panel { height: 260px; }
+.date-filter-popover .el-tree { --el-tree-node-content-height: 28px; }
+.date-filter-popover .el-tree-node__expand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  transform: none;
+}
+.date-filter-popover .el-tree-node__expand-icon > svg { display: none; }
+.date-filter-popover .el-tree-node__expand-icon::before {
+  content: '+';
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--el-text-color-secondary);
+}
+.date-filter-popover .el-tree-node__expand-icon.expanded::before { content: '−'; }
 .date-filter-popover .date-filter-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 </style>

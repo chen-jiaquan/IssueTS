@@ -11,6 +11,7 @@ import { getIssueExportLimit } from './settings.js'
 import { pool } from '../db/pool.js'
 import { config } from '../config/index.js'
 import { HttpError, ERR } from '../utils/resp.js'
+import { createPersonnel, updatePersonnel } from './archives.js'
 
 // ---------- multer ----------
 const imageUpload = multer({
@@ -40,7 +41,7 @@ export async function exportExcel(query, scope) {
   const ws = wb.addWorksheet('问题跟踪')
   ws.columns = EXPORT_KEYS.map((k) => ({ header: FIELD_LABELS[k] ?? k, key: k, width: k === 'desc' || k === 'solution' ? 40 : 14 }))
   // 按当前筛选条件（含所选项目）分批读取；系统设置 limit=0 时导出全部记录
-  const limit = await getIssueExportLimit()
+  const limit = await getIssueExportLimit(query.project)
   for await (const row of iterateIssuesForExport(query, scope, { limit })) {
     ws.addRow(Object.fromEntries(EXPORT_KEYS.map((k) => [k, fmt(row[k])])))
   }
@@ -251,4 +252,176 @@ export async function importExcel(buffer, req, mapping) {
   const failedRows = rows.filter((r) => errors.some((e) => e.row === r.row))
   const failUrl = failedRows.length ? await buildFailFile(buffer, ws, headers, failedRows, errors) : null
   return { imported: valid.length, failed: failedRows.length, errors, failUrl }
+}
+
+// ---------- 人员档案导入/导出 ----------
+const PERSONNEL_EXPORT_KEYS = ['code', 'name', 'role', 'group', 'projects', 'color', 'enabled', 'preset']
+const PERSONNEL_LABELS = {
+  code: '人员编码', name: '姓名', role: '岗位', group: '所属组',
+  projects: '所属项目', color: '颜色', enabled: '启用', preset: '系统预置',
+}
+const PERSONNEL_HEADER_TO_KEY = Object.fromEntries(
+  Object.entries(PERSONNEL_LABELS).map(([k, v]) => [v, k]))
+const PERSONNEL_REQUIRED = ['code', 'name']
+const PERSONNEL_MAX_LEN = { code: 16, name: 64, role: 32, group: 64, color: 32 }
+
+export const personnelImportFields = () =>
+  PERSONNEL_EXPORT_KEYS.map((k) => ({ key: k, label: PERSONNEL_LABELS[k] }))
+
+const boolFromCell = (s) => {
+  const v = clean(s).toLowerCase()
+  if (['是', '启用', 'true', '1'].includes(v)) return true
+  if (['否', '停用', 'false', '0'].includes(v)) return false
+  return null
+}
+const projectsFromCell = (s) => clean(s).split(/[、,，;；\s]+/).filter(Boolean)
+
+export async function exportPersonnelExcel() {
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet('人员档案')
+  ws.columns = PERSONNEL_EXPORT_KEYS.map((k) => ({
+    header: PERSONNEL_LABELS[k], key: k, width: ['name', 'projects', 'group'].includes(k) ? 22 : 14,
+  }))
+  const { rows } = await pool.query(
+    `SELECT p.code, p.name, r.name AS role, p."group", p.projects, p.color, p.enabled, p.preset
+     FROM personnel p LEFT JOIN roles r ON r.code = p.role ORDER BY p.code`)
+  for (const row of rows) {
+    ws.addRow({
+      ...row,
+      projects: Array.isArray(row.projects) ? row.projects.join('、') : '',
+      enabled: row.enabled ? '是' : '否',
+      preset: row.preset ? '是' : '否',
+    })
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}
+
+export async function importPersonnelExcel(buffer, req, mapping) {
+  const wb = new ExcelJS.Workbook()
+  try {
+    await wb.xlsx.load(buffer)
+  } catch (e) {
+    throw await structuralFail(buffer, `Excel 文件解析失败：${e.message}`)
+  }
+  const ws = wb.worksheets[0]
+  if (!ws) throw await structuralFail(buffer, '文件无工作表')
+
+  let headers
+  try {
+    headers = await readHeaders(buffer)
+  } catch {
+    throw await structuralFail(buffer, '首行未找到表头，请把表头放在第 1 行')
+  }
+  const headerCols = new Map(headers.map((h) => [h.label, h.col]))
+  const colMap = {}
+  if (mapping && Object.keys(mapping).length) {
+    for (const [key, label] of Object.entries(mapping)) {
+      if (!PERSONNEL_EXPORT_KEYS.includes(key) || !label) continue
+      const col = headerCols.get(String(label))
+      if (!col) throw await structuralFail(buffer, `映射的源列「${label}」已不在文件中，请重新选择文件`)
+      colMap[key] = col
+    }
+  } else {
+    for (const [label, key] of Object.entries(PERSONNEL_HEADER_TO_KEY)) {
+      if (headerCols.has(label)) colMap[key] = headerCols.get(label)
+    }
+  }
+  const missing = PERSONNEL_REQUIRED.filter((f) => !colMap[f])
+  if (missing.length) {
+    throw await structuralFail(buffer, `未映射必填列：${missing.map((f) => PERSONNEL_LABELS[f]).join('、')}`)
+  }
+
+  const rows = []
+  for (let r = 2; r <= ws.rowCount; r++) {
+    const vals = ws.getRow(r).values
+    const obj = { row: r }
+    let hasValue = false
+    for (const [key, col] of Object.entries(colMap)) {
+      obj[key] = cellValue(vals[col])
+      if (obj[key]) hasValue = true
+    }
+    if (hasValue) rows.push(obj)
+  }
+  if (!rows.length) throw await structuralFail(buffer, '无有效数据行')
+
+  const [personnelRows, roleRows, projectRows] = await Promise.all([
+    pool.query('SELECT code, name FROM personnel'),
+    pool.query('SELECT code, name FROM roles'),
+    pool.query('SELECT code FROM projects'),
+  ])
+  const existingByCode = new Map(personnelRows.rows.map((r) => [r.code, r.code]))
+  const existingByName = new Map(personnelRows.rows.map((r) => [r.name, r.code]))
+  const roleByCode = new Map(roleRows.rows.map((r) => [r.code, r.code]))
+  const roleByName = new Map(roleRows.rows.map((r) => [r.name, r.code]))
+  const projectCodes = new Set(projectRows.rows.map((r) => r.code))
+  const seenCodes = new Set()
+  const seenNames = new Set()
+  const errors = []
+  const valid = []
+
+  rows.forEach((row) => {
+    const before = errors.length
+    for (const f of PERSONNEL_REQUIRED) {
+      if (!row[f]) errors.push({ row: row.row, field: PERSONNEL_LABELS[f], message: '必填' })
+    }
+    for (const [f, max] of Object.entries(PERSONNEL_MAX_LEN)) {
+      if (!row[f]) continue
+      const len = [...row[f]].length
+      if (len > max) {
+        errors.push({ row: row.row, field: PERSONNEL_LABELS[f],
+          message: `内容过长（最多 ${max} 字，当前 ${len} 字）` })
+      }
+    }
+    if (row.code) {
+      if (seenCodes.has(row.code)) errors.push({ row: row.row, field: '人员编码', message: '文件内重复' })
+      seenCodes.add(row.code)
+    }
+    if (row.name) {
+      if (seenNames.has(row.name)) errors.push({ row: row.row, field: '姓名', message: '文件内重复' })
+      const boundCode = existingByName.get(row.name)
+      if (boundCode && row.code && boundCode !== row.code) {
+        errors.push({ row: row.row, field: '姓名', message: `已被人员 ${boundCode} 使用` })
+      }
+      seenNames.add(row.name)
+    }
+    row._data = {}
+    if (colMap.role && row.role) {
+      const roleCode = roleByCode.get(row.role) || roleByName.get(row.role)
+      if (!roleCode) errors.push({ row: row.row, field: '岗位', message: `角色档案中不存在：${row.role}` })
+      else row._data.role = roleCode
+    }
+    if (colMap.projects) {
+      const list = projectsFromCell(row.projects)
+      for (const code of list) {
+        if (code !== 'ALL' && !projectCodes.has(code)) {
+          errors.push({ row: row.row, field: '所属项目', message: `项目 ${code} 不存在` })
+        }
+      }
+      row._data.projects = [...new Set(list)]
+    }
+    for (const f of ['enabled', 'preset']) {
+      if (!colMap[f] || row[f] === '') continue
+      const value = boolFromCell(row[f])
+      if (value === null) errors.push({ row: row.row, field: PERSONNEL_LABELS[f], message: '请填 是/否' })
+      else row._data[f] = value
+    }
+    for (const f of ['code', 'name', 'group', 'color']) {
+      if (colMap[f]) row._data[f] = row[f] || ''
+    }
+    if (errors.length === before) valid.push(row)
+  })
+
+  let imported = 0
+  for (const row of valid) {
+    try {
+      if (existingByCode.has(row.code)) await updatePersonnel(row.code, row._data)
+      else await createPersonnel(row._data)
+      imported += 1
+    } catch (e) {
+      errors.push({ row: row.row, field: '写入', message: e.message })
+    }
+  }
+  const failedRows = rows.filter((r) => errors.some((e) => e.row === r.row))
+  const failUrl = failedRows.length ? await buildFailFile(buffer, ws, headers, failedRows, errors) : null
+  return { imported, failed: failedRows.length, errors, failUrl }
 }

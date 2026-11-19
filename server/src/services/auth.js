@@ -34,6 +34,7 @@ export async function profileOf(user) {
     username: user.username,
     person: user.person,
     role: user.role_name,
+    role_code: user.role_code,
     perms,
     projects: user.projects, // ["ALL"] 或项目编码数组
   }

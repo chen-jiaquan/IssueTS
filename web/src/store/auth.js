@@ -9,11 +9,13 @@ export const useAuthStore = defineStore('auth', {
   getters: {
     isLoggedIn: (s) => !!s.user,
     perms: (s) => s.user?.perms ?? [],
-    // ALL 或具 PROJECT_ALL 权限则可见全部项目
+    // 可见项目范围：用户档案显式配置的项目优先；仅当未配置项目(空)时才用 PROJECT_ALL 兜底
     scope: (s) => {
       if (!s.user) return []
-      if (s.user.projects.includes('ALL') || s.user.perms.includes('PROJECT_ALL')) return null
-      return s.user.projects
+      const projects = s.user.projects || []
+      if (projects.includes('ALL')) return null
+      if (projects.length) return projects
+      return s.user.perms.includes('PROJECT_ALL') ? null : []
     },
   },
   actions: {

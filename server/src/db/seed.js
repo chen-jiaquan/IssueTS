@@ -64,17 +64,17 @@ const PRODUCTS = [
 ]
 
 const PERSONNEL = [
-  { code: 'P001', name: '刘星宇', role: '交付顾问', group: '质量体系组', color: '#4c9aff' },
-  { code: 'P002', name: '陈永侃', role: '交付顾问', group: '价格管理组', color: '#a371f7' },
-  { code: 'P003', name: '张晓林', role: '交付顾问', group: '主数据组', color: '#22c55e' },
-  { code: 'P004', name: '陈超', role: '开发人员', group: '研发中心', color: '#d29922' },
-  { code: 'P005', name: '杨志豪', role: '开发人员', group: '研发中心', color: '#ef4444' },
-  { code: 'C001', name: 'wenqian', role: '客户测试', group: '客户测试组', color: '#58a6ff' },
-  { code: 'C002', name: 'Adele', role: '客户测试', group: '客户测试组', color: '#3b82f6' },
-  { code: 'C003', name: 'sally', role: '客户测试', group: '客户测试组', color: '#bc8cff' },
+  { code: 'P001', name: '刘星宇', role: 'R03', group: '质量体系组', color: '#4c9aff', projects: ['ALL'] },
+  { code: 'P002', name: '陈永侃', role: 'R03', group: '价格管理组', color: '#a371f7', projects: ['DMS-2026'] },
+  { code: 'P003', name: '张晓林', role: 'R03', group: '主数据组', color: '#22c55e', projects: ['DMS-2026', 'CTC-2026'] },
+  { code: 'P004', name: '陈超', role: 'R04', group: '研发中心', color: '#d29922', projects: ['DMS-2026'] },
+  { code: 'P005', name: '杨志豪', role: 'R04', group: '研发中心', color: '#ef4444', projects: ['DMS-2026'] },
+  { code: 'C001', name: 'wenqian', role: 'R05', group: '客户测试组', color: '#58a6ff', projects: ['DMS-2026'] },
+  { code: 'C002', name: 'Adele', role: 'R05', group: '客户测试组', color: '#3b82f6', projects: ['DMS-2026'] },
+  { code: 'C003', name: 'sally', role: 'R05', group: '客户测试组', color: '#bc8cff', projects: ['DMS-2026'] },
 ]
 
-// ---------- 数据字典（dict_key: stage/type/module/priority/impact/status/pending_test/customer_test/project） ----------
+// ---------- 数据字典（dict_key: stage/type/module/priority/impact/status/pending_test/customer_test） ----------
 const DICTS = {
   stage: [
     { v: '第一轮UAT', color: '#4c9aff', note: '第一轮用户验收测试' },
@@ -128,10 +128,6 @@ const DICTS = {
     { v: '是', color: '#4c9aff' },
     { v: '否', color: '#6e7b8b' },
   ],
-  project: [
-    { v: 'DMS-2026', color: '#4c9aff', note: '覆盖经销商、订单、价格与主数据等核心模块' },
-    { v: 'CTC-2026', color: '#a371f7', note: '客户调查表、样本管理与质量体系 UAT' },
-  ],
 }
 
 // ---------- 工作台配置 ----------
@@ -145,9 +141,9 @@ const TODO_PRIOS = [
 ]
 
 const NOTICES = [
-  { id: 'n1', type: '公告', title: 'UAT 第二轮测试将于 2026-11-20 启动', content: '请各模块负责人提前完成第一轮遗留问题的回归，并提交测试计划。', date: '2026-11-10', pinned: true },
-  { id: 'n2', type: '提醒', title: 'DMS 价格管理模块待客户复测', content: 'P001 价格管理-出厂价格 共 3 条已解决问题等待 wenqian 复测确认。', date: '2026-11-08', pinned: false },
-  { id: 'n3', type: '通知', title: '质量体系调查模板字段已更新', content: '「许可经营地址」字段文案已修正，请按最新模板录入。', date: '2026-11-05', pinned: false },
+  { id: 'n1', type: '公告', title: 'UAT 第二轮测试将于 2026-11-20 启动', content: '请各模块负责人提前完成第一轮遗留问题的回归，并提交测试计划。', date: '2026-11-10', pinned: true, projects: ['CTC-2026', 'DMS-2026'] },
+  { id: 'n2', type: '提醒', title: 'DMS 价格管理模块待客户复测', content: 'P001 价格管理-出厂价格 共 3 条已解决问题等待 wenqian 复测确认。', date: '2026-11-08', pinned: false, projects: ['DMS-2026'] },
+  { id: 'n3', type: '通知', title: '质量体系调查模板字段已更新', content: '「许可经营地址」字段文案已修正，请按最新模板录入。', date: '2026-11-05', pinned: false, projects: ['CTC-2026'] },
 ]
 
 const TODOS = [
@@ -175,8 +171,10 @@ export async function seed() {
     // 角色
     for (const r of ROLES) {
       await client.query(
-        `INSERT INTO roles(code, name, "desc", external, color) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, "desc"=EXCLUDED."desc", external=EXCLUDED.external, color=EXCLUDED.color`,
+        `INSERT INTO roles(code, name, "desc", external, color, preset, projects)
+         VALUES ($1,$2,$3,$4,$5,false,ARRAY['ALL']::text[])
+         ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, "desc"=EXCLUDED."desc", external=EXCLUDED.external,
+           color=EXCLUDED.color, preset=EXCLUDED.preset, projects=EXCLUDED.projects`,
         [r.code, r.name, r.desc, r.external, r.color],
       )
     }
@@ -184,8 +182,9 @@ export async function seed() {
     // 权限（20 项）
     for (const p of PERMS) {
       await client.query(
-        `INSERT INTO permissions(code, module, name, "desc", allow) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (code) DO UPDATE SET module=EXCLUDED.module, name=EXCLUDED.name, "desc"=EXCLUDED."desc", allow=EXCLUDED.allow`,
+        `INSERT INTO permissions(code, module, name, "desc", allow, preset) VALUES ($1,$2,$3,$4,$5,false)
+         ON CONFLICT (code) DO UPDATE SET module=EXCLUDED.module, name=EXCLUDED.name, "desc"=EXCLUDED."desc",
+           allow=EXCLUDED.allow, preset=EXCLUDED.preset`,
         [p.code, p.module, p.name, p.desc, JSON.stringify(p.allow)],
       )
     }
@@ -204,23 +203,24 @@ export async function seed() {
     // 项目 / 产品 / 人员
     for (const p of PROJECTS) {
       await client.query(
-        `INSERT INTO projects(code, name, note, color) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, note=EXCLUDED.note, color=EXCLUDED.color`,
+        `INSERT INTO projects(code, name, note, color, preset) VALUES ($1,$2,$3,$4,false)
+         ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, note=EXCLUDED.note, color=EXCLUDED.color, preset=EXCLUDED.preset`,
         [p.code, p.name, p.note, p.color],
       )
     }
     for (const p of PRODUCTS) {
       await client.query(
-        `INSERT INTO products(code, note, color) VALUES ($1,$2,$3)
-         ON CONFLICT (code) DO UPDATE SET note=EXCLUDED.note, color=EXCLUDED.color`,
+        `INSERT INTO products(code, note, color, preset) VALUES ($1,$2,$3,false)
+         ON CONFLICT (code) DO UPDATE SET note=EXCLUDED.note, color=EXCLUDED.color, preset=EXCLUDED.preset`,
         [p.code, p.note, p.color],
       )
     }
     for (const p of PERSONNEL) {
       await client.query(
-        `INSERT INTO personnel(code, name, role, "group", color) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, role=EXCLUDED.role, "group"=EXCLUDED."group", color=EXCLUDED.color`,
-        [p.code, p.name, p.role, p.group, p.color],
+        `INSERT INTO personnel(code, name, role, "group", color, projects, preset) VALUES ($1,$2,$3,$4,$5,$6,false)
+         ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, role=EXCLUDED.role, "group"=EXCLUDED."group",
+           color=EXCLUDED.color, projects=EXCLUDED.projects, preset=EXCLUDED.preset`,
+        [p.code, p.name, p.role, p.group, p.color, JSON.stringify(p.projects ?? [])],
       )
     }
 
@@ -229,10 +229,10 @@ export async function seed() {
       for (let i = 0; i < items.length; i++) {
         const it = items[i]
         await client.query(
-          `INSERT INTO dict_items(dict_key, value, label, color, note, product_code, sort)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)
+          `INSERT INTO dict_items(dict_key, value, label, color, note, product_code, sort, preset)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,false)
            ON CONFLICT (dict_key, value) DO UPDATE SET label=EXCLUDED.label, color=EXCLUDED.color,
-             note=EXCLUDED.note, product_code=EXCLUDED.product_code, sort=EXCLUDED.sort`,
+             note=EXCLUDED.note, product_code=EXCLUDED.product_code, sort=EXCLUDED.sort, preset=EXCLUDED.preset`,
           [dictKey, it.v, it.v, it.color, it.note ?? null, it.product ?? null, i],
         )
       }
@@ -243,22 +243,23 @@ export async function seed() {
       const hash = bcrypt.hashSync(u.password, 10)
       const projects = u.projects === 'ALL' ? ['ALL'] : u.projects.split(',')
       await client.query(
-        `INSERT INTO users(username, password_hash, person, role_code, status, projects)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        `INSERT INTO users(username, password_hash, person, role_code, status, projects, preset)
+         VALUES ($1,$2,$3,$4,$5,$6,false)
          ON CONFLICT (username) DO UPDATE SET password_hash=EXCLUDED.password_hash, person=EXCLUDED.person,
-           role_code=EXCLUDED.role_code, status=EXCLUDED.status, projects=EXCLUDED.projects`,
+           role_code=EXCLUDED.role_code, status=EXCLUDED.status, projects=EXCLUDED.projects, preset=EXCLUDED.preset`,
         [u.username, hash, u.person, roleCode[u.role], u.status, JSON.stringify(projects)],
       )
     }
 
     // 通知类型 / 待办优先级
     for (const name of NOTICE_TYPES) {
-      await client.query('INSERT INTO notice_types(name) VALUES ($1) ON CONFLICT (name) DO NOTHING', [name])
+      await client.query(`INSERT INTO notice_types(name, preset) VALUES ($1,false)
+        ON CONFLICT (name) DO UPDATE SET preset=EXCLUDED.preset`, [name])
     }
     for (const p of TODO_PRIOS) {
       await client.query(
-        `INSERT INTO todo_prios(code, label) VALUES ($1,$2)
-         ON CONFLICT (code) DO UPDATE SET label=EXCLUDED.label`,
+        `INSERT INTO todo_prios(code, label, preset) VALUES ($1,$2,false)
+         ON CONFLICT (code) DO UPDATE SET label=EXCLUDED.label, preset=EXCLUDED.preset`,
         [p.code, p.label],
       )
     }
@@ -266,10 +267,11 @@ export async function seed() {
     // 通知 / 待办
     for (const n of NOTICES) {
       await client.query(
-        `INSERT INTO notices(id, type, title, content, date, pinned) VALUES ($1,$2,$3,$4,$5,$6)
+        `INSERT INTO notices(id, type, title, content, date, pinned, projects, recipients, "groups")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'{}'::text[],'{}'::text[])
          ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, title=EXCLUDED.title, content=EXCLUDED.content,
-           date=EXCLUDED.date, pinned=EXCLUDED.pinned`,
-        [n.id, n.type, n.title, n.content, n.date, n.pinned],
+           date=EXCLUDED.date, pinned=EXCLUDED.pinned, projects=EXCLUDED.projects`,
+        [n.id, n.type, n.title, n.content, n.date, n.pinned, n.projects],
       )
     }
     for (const t of TODOS) {
@@ -284,8 +286,10 @@ export async function seed() {
     // 预警规则
     for (const r of ALERT_RULES) {
       await client.query(
-        `INSERT INTO alert_rules(key, enabled, days, label) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (key) DO UPDATE SET enabled=EXCLUDED.enabled, days=EXCLUDED.days, label=EXCLUDED.label`,
+        `INSERT INTO alert_rules(key, enabled, days, label, preset, projects)
+         VALUES ($1,$2,$3,$4,false,ARRAY['ALL']::text[])
+         ON CONFLICT (key) DO UPDATE SET enabled=EXCLUDED.enabled, days=EXCLUDED.days,
+           label=EXCLUDED.label, preset=EXCLUDED.preset, projects=EXCLUDED.projects`,
         [r.key, r.enabled, r.days, r.label],
       )
     }

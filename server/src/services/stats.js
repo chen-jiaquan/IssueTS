@@ -2,7 +2,7 @@
 // 口径与列表可见项目一致；高频结果进程内缓存 TTL 120s，问题写入后失效
 import ExcelJS from 'exceljs'
 import { pool } from '../db/pool.js'
-import { listIssues } from './issues.js'
+import { iterateIssuesForExport } from './issues.js'
 
 // 行维度 → 实际字段（dim=owner 时按 personField 二选一）
 export const DIM_FIELD = {
@@ -60,12 +60,13 @@ export async function pivot(query, scope) {
   const hit = cacheGet(key)
   if (hit) return hit
 
-  const { list } = await listIssues({ page: 1, pageSize: 200, ...query }, scope)
   const rows = new Map()
   const cols = new Map()
   const matrix = {}
+  let grandTotal = 0
 
-  for (const it of list) {
+  // 全量分批遍历匹配记录（不受分页上限约束），与问题列表共用筛选条件
+  for await (const it of iterateIssuesForExport(query, scope)) {
     const rowVal = it[field] || BLANK
     const colVal = bucketKey(it[timeField], gran)
     if (query.rowFilter && !String(query.rowFilter).split(',').includes(rowVal)) continue
@@ -73,6 +74,7 @@ export async function pivot(query, scope) {
     cols.set(colVal, (cols.get(colVal) || 0) + 1)
     ;(matrix[rowVal] ??= {})
     matrix[rowVal][colVal] = (matrix[rowVal][colVal] || 0) + 1
+    grandTotal += 1
   }
 
   // 列排序（时间桶升序，空桶最后）
@@ -91,14 +93,14 @@ export async function pivot(query, scope) {
     matrix: Object.fromEntries(sortedRows.map((r) => [
       r, Object.fromEntries(sortedCols.map((c) => [c, matrix[r][c] || 0])),
     ])),
-    rowTotals, colTotals, grandTotal: list.length,
+    rowTotals, colTotals, grandTotal,
   }
   cacheSet(key, result)
   return result
 }
 
-// ---------- 透视导出（xlsx：行维度×时间桶 + 合计列/行） ----------
-export async function exportPivot(query, scope) {
+// ---------- 透视导出（xlsx：统计表 + 图形统计 sheet） ----------
+export async function exportPivot(query, scope, charts = []) {
   const data = await pivot(query, scope)
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('统计透视')
@@ -108,10 +110,32 @@ export async function exportPivot(query, scope) {
     { header: dimLabel, key: 'row', width: 20 },
     ...colHeaders.map((c) => ({ header: c, key: c, width: 14 })),
   ]
+  // 表头与样式
+  const head = ws.getRow(1)
+  head.font = { bold: true }
+  head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9E1F2' } }
+  head.alignment = { vertical: 'middle', horizontal: 'center' }
   for (const r of data.rows) {
     ws.addRow({ row: r, ...Object.fromEntries(colHeaders.map((c) => [c, c === '合计' ? data.rowTotals[r] : data.matrix[r][c] || 0])) })
   }
   const totalRow = { row: '合计', ...Object.fromEntries(colHeaders.map((c) => [c, c === '合计' ? data.grandTotal : data.colTotals[c] || 0])) }
-  ws.addRow(totalRow)
+  const last = ws.addRow(totalRow)
+  last.font = { bold: true }
+  last.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } }
+  ws.views = [{ state: 'frozen', ySplit: 1 }]
+
+  // 图形统计 sheet：把前端生成的 PNG 图表嵌入
+  if (charts.length) {
+    const cs = wb.addWorksheet('图形统计')
+    cs.getColumn(1).width = 4
+    let rowCursor = 2
+    for (const dataUrl of charts) {
+      // data:image/png;base64, 前缀需去掉
+      const base64 = String(dataUrl).replace(/^data:image\/png;base64,/, '')
+      const id = wb.addImage({ buffer: Buffer.from(base64, 'base64'), extension: 'png' })
+      cs.addImage(id, { tl: { col: 1, row: rowCursor }, ext: { width: 640, height: 320 } })
+      rowCursor += 19
+    }
+  }
   return Buffer.from(await wb.xlsx.writeBuffer())
 }

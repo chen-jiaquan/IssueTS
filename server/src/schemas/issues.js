@@ -82,6 +82,9 @@ export const listQueryRules = [
   query('pageSize').optional().isInt({ min: 1, max: 2000 }).toInt(),
   query('sort').optional().isIn(SORTABLE).withMessage('排序字段非法'),
   query('order').optional().isIn(['asc', 'desc']),
+  query('timeField').optional().isIn(['planEnd', 'resolvedAt']),
+  query('dateFrom').optional({ checkFalsy: true }).matches(DATE_RE),
+  query('dateTo').optional({ checkFalsy: true }).matches(DATE_RE),
   ...FILTERABLE.map((k) => query(k).optional().isString().withMessage(`${k} 筛选值非法`)),
 ]
 

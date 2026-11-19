@@ -26,7 +26,7 @@ router.get('/import/fields', hasPerm('ISSUE_IMPORT'),
   asyncHandler(async (_req, res) => ok(res, X.importFields())))
 router.post('/import/headers', hasPerm('ISSUE_IMPORT'), X.uploadSingle,
   asyncHandler(async (req, res) => ok(res, { headers: await X.readHeaders(req.file.buffer) })))
-router.post('/import', hasPerm('ISSUE_IMPORT'), X.uploadSingle,
+router.post('/import', hasPerm('ISSUE_IMPORT'), X.uploadSingle, attachScope,
   asyncHandler(async (req, res) => {
     try {
       let mapping = req.body?.mapping
@@ -67,11 +67,11 @@ router.post('/', hasPerm('ISSUE_CREATE'), issueCreateRules, validate, attachScop
   }))
 
 // 编辑全部字段（字段级留痕）
-router.put('/:seq', hasPerm('ISSUE_EDIT'), seqParam, issueUpdateRules, validate,
+router.put('/:seq', hasPerm('ISSUE_EDIT'), seqParam, issueUpdateRules, validate, attachScope,
   asyncHandler(async (req, res) => {
     const old = await S.getIssueBySeq(req.params.seq, req.scope)
     if (req.body.project && req.body.project !== old.project) assertProjectVisible(req, req.body.project)
-    const { issue, changed } = await S.updateIssue(req.params.seq, req.body, req.profile)
+    const { issue, changed } = await S.updateIssue(req.params.seq, req.body, req.profile, req.scope)
     ok(res, { issue, changed: changed.map((k) => S.FIELD_LABELS[k] ?? k) })
   }))
 
@@ -80,16 +80,16 @@ router.post('/batch-delete', hasPerm('ISSUE_DELETE'), batchDeleteRules, validate
   asyncHandler(async (req, res) => ok(res, await S.batchDelete(req.body.seqs, req.scope))))
 
 // 删除
-router.delete('/:seq', hasPerm('ISSUE_DELETE'), seqParam, validate,
+router.delete('/:seq', hasPerm('ISSUE_DELETE'), seqParam, validate, attachScope,
   asyncHandler(async (req, res) => { await S.deleteIssue(req.params.seq, req.scope); ok(res) }))
 
 // 批量行内修改（逐行留痕）
-router.post('/batch', hasPerm('ISSUE_BATCH'), batchRules, validate,
-  asyncHandler(async (req, res) => ok(res, await S.batchUpdate(req.body.seqs, req.body.patch, req.profile))))
+router.post('/batch', hasPerm('ISSUE_BATCH'), batchRules, validate, attachScope,
+  asyncHandler(async (req, res) => ok(res, await S.batchUpdate(req.body.seqs, req.body.patch, req.profile, req.scope))))
 
 // 行内分配负责人/开发人员 + 生成通知
-router.post('/:seq/assign', hasPerm('ISSUE_ASSIGN'), seqParam, assignRules, validate,
-  asyncHandler(async (req, res) => ok(res, await S.assign(req.params.seq, req.body.field, req.body.value, req.profile))))
+router.post('/:seq/assign', hasPerm('ISSUE_ASSIGN'), seqParam, assignRules, validate, attachScope,
+  asyncHandler(async (req, res) => ok(res, await S.assign(req.params.seq, req.body.field, req.body.value, req.profile, req.scope))))
 
 // 单问题修改日志
 router.get('/:seq/logs', hasPerm('ISSUE_LOG'), seqParam, validate, attachScope,

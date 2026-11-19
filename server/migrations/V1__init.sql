@@ -14,7 +14,8 @@ CREATE TABLE roles (
     name      varchar(32) NOT NULL UNIQUE,
     "desc"    varchar(128),
     external  boolean     NOT NULL DEFAULT false,
-    color     varchar(32)
+    color     varchar(32),
+    preset    boolean     NOT NULL DEFAULT false -- 系统预置数据，默认不可删除/禁用
 );
 
 -- ---------- 1.2 权限（20 项） ----------
@@ -23,7 +24,8 @@ CREATE TABLE permissions (
     module varchar(32),
     name   varchar(64) NOT NULL,
     "desc" varchar(128),
-    allow  jsonb          -- 种子默认授权角色名数组（由 seed 展开写入 role_permissions）
+    allow  jsonb,         -- 种子默认授权角色名数组（由 seed 展开写入 role_permissions）
+    preset boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 1.3 用户 ----------
@@ -35,7 +37,8 @@ CREATE TABLE users (
     role_code     varchar(16) REFERENCES roles(code),
     status        varchar(8)  NOT NULL DEFAULT '启用' CHECK (status IN ('启用','停用')),
     projects      jsonb       NOT NULL,                 -- ["ALL"] 或项目编码数组
-    created_at    timestamp   NOT NULL DEFAULT now()
+    created_at    timestamp   NOT NULL DEFAULT now(),
+    preset        boolean     NOT NULL DEFAULT false
 );
 
 -- ---------- 1.4 角色×权限分配矩阵 ----------
@@ -47,17 +50,21 @@ CREATE TABLE role_permissions (
 
 -- ---------- 2.1 项目 ----------
 CREATE TABLE projects (
-    code  varchar(32) PRIMARY KEY,
-    name  varchar(128),
-    note  varchar(255),
-    color varchar(32)
+    code    varchar(32) PRIMARY KEY,
+    name    varchar(128),
+    note    varchar(255),
+    color   varchar(32),
+    enabled boolean NOT NULL DEFAULT true,
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 2.2 产品 ----------
 CREATE TABLE products (
-    code  varchar(32) PRIMARY KEY,
-    note  varchar(255),
-    color varchar(32)
+    code    varchar(32) PRIMARY KEY,
+    note    varchar(255),
+    color   varchar(32),
+    enabled boolean NOT NULL DEFAULT true,
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 2.3 人员（负责人/开发人员/提出人共用） ----------
@@ -66,19 +73,25 @@ CREATE TABLE personnel (
     name  varchar(64) NOT NULL UNIQUE,
     role  varchar(32),
     "group" varchar(64),          -- 所属组
-    color varchar(32)
+    color varchar(32),
+    projects jsonb NOT NULL DEFAULT '[]'::jsonb, -- 所属项目编码数组，['ALL'] 表示全部项目
+    enabled boolean NOT NULL DEFAULT true,
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 2.4 数据字典（统一表） ----------
 CREATE TABLE dict_items (
     id           bigserial PRIMARY KEY,
-    dict_key     varchar(32) NOT NULL,   -- stage/type/module/priority/impact/status/pending_test/customer_test/project
+    dict_key     varchar(32) NOT NULL,   -- stage/type/module/priority/impact/status/pending_test/customer_test
     value        varchar(64) NOT NULL,
     label        varchar(128),
     color        varchar(32),
     note         varchar(255),
     product_code varchar(32) REFERENCES products(code),  -- 仅 module 用（所属产品）
+    project_code varchar(32) NOT NULL DEFAULT '',       -- 归属项目编码，空=全部项目可用
     sort         int NOT NULL DEFAULT 0,
+    enabled      boolean NOT NULL DEFAULT true,
+    preset       boolean NOT NULL DEFAULT false,
     CONSTRAINT uk_dict UNIQUE (dict_key, value)
 );
 CREATE INDEX idx_dict_key ON dict_items(dict_key);
@@ -138,9 +151,11 @@ CREATE INDEX idx_logs_by      ON issue_logs(changed_by);
 
 -- ---------- 4.1 自定义字段定义 ----------
 CREATE TABLE custom_fields (
-    key   varchar(64) PRIMARY KEY,        -- cf_ + 序号
-    label varchar(64) NOT NULL,
-    type  varchar(16) NOT NULL CHECK (type IN ('text','textarea','number','date'))
+    key     varchar(64) PRIMARY KEY,        -- cf_ + 序号
+    label   varchar(64) NOT NULL,
+    type    varchar(16) NOT NULL CHECK (type IN ('text','textarea','number','date')),
+    enabled boolean NOT NULL DEFAULT true,
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 4.2 必填字段配置 ----------
@@ -150,14 +165,18 @@ CREATE TABLE required_fields (
 
 -- ---------- 4.3 通知类型（首项为默认） ----------
 CREATE TABLE notice_types (
-    id   bigserial PRIMARY KEY,
-    name varchar(32) NOT NULL UNIQUE
+    id      bigserial PRIMARY KEY,
+    name    varchar(32) NOT NULL UNIQUE,
+    enabled boolean NOT NULL DEFAULT true,
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 4.4 待办优先级 ----------
 CREATE TABLE todo_prios (
-    code  varchar(8) PRIMARY KEY,         -- C/H/M/L
-    label varchar(64)
+    code    varchar(8) PRIMARY KEY,         -- C/H/M/L
+    label   varchar(64),
+    enabled boolean NOT NULL DEFAULT true,
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 4.5 通知消息 ----------
@@ -188,7 +207,8 @@ CREATE TABLE alert_rules (
     key     varchar(32) PRIMARY KEY,      -- overdue/highPause/custTest
     enabled boolean NOT NULL,
     days    int,                          -- overdue=0（已过期）；custTest=7；highPause 无阈值
-    label   varchar(128)
+    label   varchar(128),
+    preset  boolean NOT NULL DEFAULT false
 );
 
 -- ---------- 应用元信息（迁移/种子标记、系统设置等） ----------

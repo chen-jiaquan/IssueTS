@@ -1,7 +1,7 @@
 import http from './http'
 
-export const getSummary = () => http.get('/home/summary')
-export const getAlerts = () => http.get('/home/alerts')
+export const getSummary = (params) => http.get('/home/summary', { params })
+export const getAlerts = (params) => http.get('/home/alerts', { params })
 
 export const listNotices = () => http.get('/notices')
 export const createNotice = (data) => http.post('/notices', data)
