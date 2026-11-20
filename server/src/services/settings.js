@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { pool } from '../db/pool.js'
 import { HttpError, ERR } from '../utils/resp.js'
-import { assertProjectsRequired } from '../middleware/scope.js'
+import { assertProjectsEditable } from '../middleware/scope.js'
 
 // 系统设置：兼容历史 app_meta 全局值；新增项目维度设置存 system_settings。
 // 读取优先级：匹配项目 > ALL > 全局(空数组) > app_meta > 默认值。
@@ -77,7 +77,7 @@ export const listSettingItems = async () =>
 
 async function upsertSetting(req, key, value, projects, id) {
   const normalized = await validateProjects(normalizeProjects(projects))
-  assertProjectsRequired(req, normalized)
+  assertProjectsEditable(req, normalized)
   const text = String(value)
   if (id) {
     const { rows } = await pool.query(

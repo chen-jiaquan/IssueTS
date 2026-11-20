@@ -36,11 +36,8 @@ const matrix = reactive({}) // role_code -> Set(perm_code)
 const savingRole = ref('')
 const loading = ref(false)
 
-const usersProjectFilter = ref('')
-const rolesProjectFilter = ref('')
-const matrixProjectFilter = ref('')
-const alertsProjectFilter = ref('')
-const settingsProjectFilter = ref('')
+const usersProjectFilter = ref([])
+const rolesProjectFilter = ref([])
 
 const visibleProjects = () => projects.value.filter((p) => p.enabled !== false && (!auth.scope || auth.scope.includes(p.code)))
 const projectOptions = computed(() => visibleProjects().map((p) => ({ value: p.code, label: `${p.code} ${p.name}` })))
@@ -48,18 +45,25 @@ const projectSelectOptions = computed(() => [
   ...(auth.scope ? [] : [{ value: 'ALL', label: '全部项目（ALL）' }]),
   ...projectOptions.value,
 ])
+const projectLabel = (code) => (code === 'ALL'
+  ? '全部项目'
+  : (projects.value.find((p) => p.code === code)?.name ?? code))
 const projectLabels = (list) => {
   const codes = list || []
+  if (!codes.length) return '—'
   if (codes.includes('ALL')) return '全部项目'
-  return codes.map((c) => projects.value.find((p) => p.code === c)?.name || c).join('、')
+  return codes.map(projectLabel).join('、')
 }
-const filterByProject = (rows, code) => !code
-  ? rows
-  : rows.filter((r) => (r.projects || []).includes(code) || (r.projects || []).includes('ALL'))
+const filterByProject = (rows, selected) => {
+  const codes = Array.isArray(selected) ? selected : (selected ? [selected] : [])
+  if (!codes.length) return rows
+  return rows.filter((r) => {
+    const own = r.projects || []
+    return own.includes('ALL') || codes.some((c) => own.includes(c))
+  })
+}
 const filteredUsers = computed(() => filterByProject(users.value, usersProjectFilter.value))
 const filteredRoles = computed(() => filterByProject(roles.value, rolesProjectFilter.value))
-const matrixRoles = computed(() => filterByProject(roles.value, matrixProjectFilter.value))
-const filteredAlertRules = computed(() => filterByProject(alertRules.value, alertsProjectFilter.value))
 
 const roleName = (code) => roles.value.find((r) => r.code === code)?.name ?? code
 const roleColor = (code) => roles.value.find((r) => r.code === code)?.color
@@ -76,7 +80,7 @@ async function loadBase() {
     roles.value = r
     perms.value = p
   }
-  if (canAlert) alertRules.value = await listAlertRules(alertsProjectFilter.value)
+  if (canAlert) alertRules.value = await listAlertRules()
 }
 
 async function loadRoles() {
@@ -86,7 +90,7 @@ async function loadRoles() {
 
 async function loadAlerts() {
   if (!canAlert) return
-  alertRules.value = await listAlertRules(alertsProjectFilter.value)
+  alertRules.value = await listAlertRules()
 }
 
 // ---------- 角色档案 ----------
@@ -145,18 +149,13 @@ async function togglePermPreset(row) {
 
 // ---------- 预警规则 ----------
 async function saveAlertRule(row) {
-  if (requiresProject() && !(row.projects || []).length) {
-    await loadAlerts()
-    return ElMessage.warning('所属项目必填')
-  }
-  const snapshot = { ...row, projects: [...(row.projects || [])] }
+  const snapshot = { ...row }
   try {
     await putAlertRule({
       key: row.key,
       enabled: !!row.enabled,
       days: row.days === '' ? null : Number(row.days),
       preset: !!row.preset,
-      projects: row.projects,
     })
     ElMessage.success(`规则「${row.label}」已保存`)
   } catch (e) {
@@ -172,7 +171,7 @@ async function loadUsers() {
 
 async function loadMatrix() {
   if (!canSecurity) return
-  const rows = await getRolePerms(matrixProjectFilter.value)
+  const rows = await getRolePerms()
   for (const r of roles.value) matrix[r.code] = new Set()
   for (const row of rows) (matrix[row.role_code] ??= new Set()).add(row.perm_code)
 }
@@ -181,15 +180,12 @@ async function loadMatrix() {
 const userDialog = ref(false)
 const editingUser = ref(null)
 const userForm = reactive({ username: '', password: '', person: '', role_code: '', status: '启用', projects: [], preset: false })
-const allProjects = ref(false)
 const selectedUserRole = computed(() => roles.value.find((r) => r.code === userForm.role_code))
 
 function openUser(row = null) {
   editingUser.value = row
-  // 受限管理员不能授予/保留 ALL，强制按具体项目展示
-  allProjects.value = !auth.scope && !!row?.projects?.includes('ALL')
   Object.assign(userForm, row
-    ? { username: row.username, password: '', person: row.person || '', role_code: row.role_code, status: row.status, projects: allProjects.value ? [] : (row.projects || []).filter((p) => p !== 'ALL'), preset: !!row.preset }
+    ? { username: row.username, password: '', person: row.person || '', role_code: row.role_code, status: row.status, projects: [...(row.projects || [])], preset: !!row.preset }
     : { username: '', password: '', person: '', role_code: roles.value[0]?.code ?? '', status: '启用', projects: [], preset: false })
   userDialog.value = true
 }
@@ -198,9 +194,8 @@ async function saveUser() {
   if (!userForm.username.trim()) return ElMessage.warning('用户名必填')
   if (!userForm.role_code) return ElMessage.warning('角色必填')
   if (!editingUser.value && (userForm.password || '').length < 6) return ElMessage.warning('密码至少 6 位')
-  const finalProjects = allProjects.value ? ['ALL'] : userForm.projects
-  if (requiresProject(selectedUserRole.value) && !finalProjects.length) return ElMessage.warning('所属项目必填')
-  const payload = { ...userForm, projects: finalProjects }
+  if (requiresProject(selectedUserRole.value) && !userForm.projects.length) return ElMessage.warning('所属项目必填')
+  const payload = { ...userForm }
   if (!editingUser.value) {
     await createUser(payload)
     ElMessage.success('用户已创建')
@@ -274,31 +269,14 @@ const rowsOfRole = (roleCode) => matrix[roleCode]?.size ?? 0
 // ---------- 系统设置 ----------
 const exportLimit = ref(0)
 const defaultPassword = ref('')
-const settingsProjects = ref([])
 const settingsSaving = ref(false)
 const passwordSaving = ref(false)
 
 async function loadSettings() {
   if (!canSecurity) return
-  const [limit, password] = await Promise.all([
-    getIssueExportLimit(settingsProjectFilter.value),
-    getDefaultUserPassword(settingsProjectFilter.value),
-  ])
+  const [limit, password] = await Promise.all([getIssueExportLimit(), getDefaultUserPassword()])
   exportLimit.value = limit
   defaultPassword.value = password
-}
-
-async function onSettingsProjectChange() {
-  if (settingsProjectFilter.value) settingsProjects.value = [settingsProjectFilter.value]
-  await loadSettings()
-}
-
-function ensureSettingsProject() {
-  if (requiresProject() && !settingsProjects.value.length) {
-    ElMessage.warning('所属项目必填')
-    return false
-  }
-  return true
 }
 
 async function saveIssueExportLimit() {
@@ -306,10 +284,9 @@ async function saveIssueExportLimit() {
   if (!Number.isInteger(value) || value < 0 || value > 100000) {
     return ElMessage.warning('导出上限须为 0~100000 的整数')
   }
-  if (!ensureSettingsProject()) return
   settingsSaving.value = true
   try {
-    await putIssueExportLimit(value, settingsProjects.value)
+    await putIssueExportLimit(value)
     exportLimit.value = value
     ElMessage.success(value === 0 ? '已保存：导出不限制行数' : `已保存：最多导出 ${value} 条`)
   } catch (e) {
@@ -322,10 +299,9 @@ async function saveIssueExportLimit() {
 async function saveDefaultPassword() {
   const value = String(defaultPassword.value || '').trim()
   if (value.length < 6 || value.length > 64) return ElMessage.warning('默认密码须为 6~64 位')
-  if (!ensureSettingsProject()) return
   passwordSaving.value = true
   try {
-    await putDefaultUserPassword(value, settingsProjects.value)
+    await putDefaultUserPassword(value)
     ElMessage.success('默认用户密码已保存；后续人员下推用户时使用')
   } catch (e) {
     ElMessage.error(e.message)
@@ -355,7 +331,7 @@ onMounted(async () => {
       <el-tab-pane v-if="canSecurity" label="用户管理" name="users">
         <div class="toolbar">
           <el-button type="primary" @click="openUser()">新增用户</el-button>
-          <el-select v-model="usersProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px" @change="loadUsers">
+          <el-select v-model="usersProjectFilter" multiple collapse-tags clearable placeholder="按所属项目过滤" style="width:240px" @change="loadUsers">
             <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
           </el-select>
           <span class="tip">共 {{ filteredUsers.length }} 个账号（密码 bcrypt 存储，不回显）</span>
@@ -374,10 +350,7 @@ onMounted(async () => {
             </template>
           </el-table-column>
           <el-table-column label="所属项目" min-width="200">
-            <template #default="{ row }">
-              <el-tag v-if="row.projects?.includes('ALL')" size="small" type="warning" effect="plain">全部项目</el-tag>
-              <el-tag v-for="p in (row.projects || []).filter(x => x !== 'ALL')" :key="p" size="small" style="margin-right:4px">{{ p }}</el-tag>
-            </template>
+            <template #default="{ row }">{{ projectLabels(row.projects) }}</template>
           </el-table-column>
           <el-table-column label="状态" width="80">
             <template #default="{ row }">
@@ -401,7 +374,7 @@ onMounted(async () => {
       <el-tab-pane v-if="canArchive" label="角色" name="roles">
         <div class="toolbar">
           <el-button type="primary" @click="openRole()">新增角色</el-button>
-          <el-select v-model="rolesProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px" @change="loadRoles">
+          <el-select v-model="rolesProjectFilter" multiple collapse-tags clearable placeholder="按所属项目过滤" style="width:240px" @change="loadRoles">
             <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
           </el-select>
           <span class="tip">角色授权在「角色权限」页签维护</span>
@@ -410,7 +383,7 @@ onMounted(async () => {
           <el-table-column prop="code" label="编码" width="110" />
           <el-table-column prop="name" label="角色名" width="140" />
           <el-table-column label="所属项目" min-width="180">
-            <template #default="{ row }">{{ projectLabels(row.projects) || '—' }}</template>
+            <template #default="{ row }">{{ projectLabels(row.projects) }}</template>
           </el-table-column>
           <el-table-column label="系统预置" width="100">
             <template #default="{ row }">{{ row.preset ? '是' : '否' }}</template>
@@ -456,21 +429,14 @@ onMounted(async () => {
       <el-tab-pane v-if="canSecurity" label="角色权限" name="matrix">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
           title="勾选即生效前需点列头「保存」；权限变更后用户下次登录/刷新档案生效" />
-        <div class="toolbar">
-          <el-select v-model="matrixProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px" @change="loadMatrix">
-            <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
-          </el-select>
-          <span class="tip">按角色所属项目过滤矩阵列</span>
-        </div>
         <div class="matrix-wrap">
           <table class="matrix">
             <thead>
               <tr>
                 <th class="first">权限位</th>
-                <th v-for="r in matrixRoles" :key="r.code">
+                <th v-for="r in roles" :key="r.code">
                   <div class="role-hd">
                     <div>{{ r.code }} {{ r.name }}</div>
-                    <div class="role-sub">所属项目：{{ projectLabels(r.projects) || '—' }}</div>
                     <div class="role-sub">{{ rowsOfRole(r.code) }}/{{ perms.length }} 项</div>
                     <div class="role-ops">
                       <el-button link size="small" @click="setRoleAll(r.code)">{{ roleHasAll(r.code) ? '清空' : '全选' }}</el-button>
@@ -483,7 +449,7 @@ onMounted(async () => {
             <tbody>
               <template v-for="[mod, list] in permGroups" :key="mod">
                 <tr class="group-row">
-                  <td :colspan="matrixRoles.length + 1">{{ mod }}</td>
+                  <td :colspan="roles.length + 1">{{ mod }}</td>
                 </tr>
                 <tr v-for="p in list" :key="p.code">
                   <td class="first">
@@ -491,7 +457,7 @@ onMounted(async () => {
                     <span class="name">{{ p.name }}</span>
                     <div v-if="p.desc" class="desc">{{ p.desc }}</div>
                   </td>
-                  <td v-for="r in matrixRoles" :key="r.code" class="cell">
+                  <td v-for="r in roles" :key="r.code" class="cell">
                     <el-checkbox :model-value="matrix[r.code]?.has(p.code)"
                       @change="(v) => togglePerm(r.code, p.code, v)" />
                   </td>
@@ -505,22 +471,11 @@ onMounted(async () => {
       <!-- ========== 预警规则 ========== -->
       <el-tab-pane v-if="canAlert" label="预警规则" name="alerts">
         <div class="toolbar">
-          <el-select v-model="alertsProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px" @change="loadAlerts">
-            <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
-          </el-select>
           <span class="tip">启用后规则在首页工作台「预警事项」实时生效；custTest 的天数为已解决后未完成客户测试的容忍天数</span>
         </div>
-        <el-table :data="filteredAlertRules" size="small" border max-height="calc(100vh - 230px)">
+        <el-table :data="alertRules" size="small" border max-height="calc(100vh - 230px)">
           <el-table-column prop="key" label="规则键" width="120" />
-          <el-table-column prop="label" label="说明" min-width="220" />
-          <el-table-column label="所属项目" min-width="220" :required="requiresProject()">
-            <template #default="{ row }">
-              <el-select v-model="row.projects" multiple filterable size="small" style="width:100%"
-                placeholder="选择所属项目" @change="saveAlertRule(row)">
-                <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
-              </el-select>
-            </template>
-          </el-table-column>
+          <el-table-column prop="label" label="说明" min-width="240" />
           <el-table-column label="系统预置" width="100">
             <template #default="{ row }"><el-switch v-model="row.preset" @change="saveAlertRule(row)" /></template>
           </el-table-column>
@@ -543,18 +498,7 @@ onMounted(async () => {
       <el-tab-pane v-if="canSecurity" label="系统设置" name="settings">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
           title="导出上限控制问题列表导出行数；默认密码用于人员档案自动下推生成的用户账号初始密码。" />
-        <div class="toolbar">
-          <el-select v-model="settingsProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px" @change="onSettingsProjectChange">
-            <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
-          </el-select>
-          <span class="tip">选择项目后读取该项目的专属设置；未配置时回退为全局值</span>
-        </div>
-        <el-form label-width="140px" style="max-width: 680px">
-          <el-form-item label="所属项目" :required="requiresProject()">
-            <el-select v-model="settingsProjects" multiple filterable style="width:100%" placeholder="选择所属项目；留空表示全局设置（仅系统管理员）">
-              <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
-            </el-select>
-          </el-form-item>
+        <el-form label-width="140px" style="max-width: 560px">
           <el-form-item label="导出记录上限">
             <div style="display:flex; align-items:center; gap:12px; width:100%">
               <el-input-number v-model="exportLimit" :min="0" :max="100000" :step="100"
@@ -601,13 +545,10 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="所属项目" :required="requiresProject(selectedUserRole)">
-          <div style="width:100%">
-            <el-checkbox v-if="!auth.scope" v-model="allProjects">全部项目（含新增）</el-checkbox>
-            <el-select v-model="userForm.projects" multiple filterable :disabled="allProjects" style="width:100%"
-              placeholder="选择所属项目">
-              <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
-            </el-select>
-          </div>
+          <el-select v-model="userForm.projects" multiple filterable collapse-tags clearable style="width:100%"
+            placeholder="选择所属项目">
+            <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
+          </el-select>
         </el-form-item>
         <el-form-item label="状态">
           <el-radio-group v-model="userForm.status">

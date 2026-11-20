@@ -18,6 +18,12 @@ function wrap(err, fallbackMsg) {
 const normalizeProjects = (v) =>
   [...new Set((Array.isArray(v) ? v : []).filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()))]
 
+// 列表过滤项目：兼容 ?project=A&project=B 与 ?project=A,B
+const normalizeProjectFilter = (v) => {
+  const raw = Array.isArray(v) ? v : (typeof v === 'string' && v ? v.split(',') : [])
+  return [...new Set(raw.map((x) => String(x).trim()).filter(Boolean))]
+}
+
 async function validateProjects(projects) {
   const codes = projects.filter((p) => p !== 'ALL')
   if (!codes.length) return projects
@@ -52,9 +58,10 @@ function projectScopeClause(scope, project, startIdx, alias = '') {
       idx += 1
     }
   }
-  if (project) {
-    params.push(project)
-    clauses.push(`(${p}projects @> ARRAY[$${idx}]::text[] OR ${p}projects @> ARRAY['ALL']::text[])`)
+  const codes = normalizeProjectFilter(project)
+  if (codes.length) {
+    params.push(codes)
+    clauses.push(`(${p}projects @> $${idx}::text[] OR ${p}projects @> ARRAY['ALL']::text[])`)
   }
   return { clause: clauses.length ? ` AND ${clauses.map((c) => `(${c})`).join(' AND ')}` : '', params }
 }
@@ -365,9 +372,10 @@ export async function listUsers(scope, project) {
     if (!scope.length) where += ' AND FALSE'
     else { params.push(scope); where += ` AND (u.projects ? 'ALL' OR u.projects ?| $${params.length}::text[])` }
   }
-  if (project) {
-    params.push(project)
-    where += ` AND (u.projects ? $${params.length} OR u.projects ? 'ALL')`
+  const codes = normalizeProjectFilter(project)
+  if (codes.length) {
+    params.push(codes)
+    where += ` AND (u.projects ?| $${params.length}::text[] OR u.projects ? 'ALL')`
   }
   const { rows } = await pool.query(
     `SELECT u.id, u.username, u.person, u.status, u.projects, u.role_code, r.name AS role_name, u.preset
@@ -533,15 +541,13 @@ export async function removeTodoPrio(code) {
 }
 
 const ALERT_COLS = 'key, enabled, days, label, preset, projects'
-export function listAlertRules(scope, project) {
-  const f = projectScopeClause(scope, project, 1)
-  return pool.query(`SELECT ${ALERT_COLS} FROM alert_rules WHERE true${f.clause} ORDER BY key`, f.params).then((r) => r.rows)
-}
-export async function putAlertRule(b, req) {
-  const projects = await validateProjects(normalizeProjects(b.projects))
-  assertProjectsRequired(req, projects)
+export const listAlertRules = () =>
+  pool.query(`SELECT ${ALERT_COLS} FROM alert_rules ORDER BY key`).then((r) => r.rows)
+export async function putAlertRule(b) {
+  // 界面不再维护所属项目，未传时保留原值（存量规则为 ALL）。
+  const projects = b.projects === undefined ? null : await validateProjects(normalizeProjects(b.projects))
   const { rows } = await pool.query(
-    `UPDATE alert_rules SET enabled=$2, days=$3, preset=COALESCE($4,preset), projects=$5::text[]
+    `UPDATE alert_rules SET enabled=$2, days=$3, preset=COALESCE($4,preset), projects=COALESCE($5::text[],projects)
      WHERE key=$1 RETURNING ${ALERT_COLS}`,
     [b.key, b.enabled, b.days ?? null, b.preset, projects])
   if (!rows.length) throw new HttpError(404, ERR.NOT_FOUND, '预警规则不存在')

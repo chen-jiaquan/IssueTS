@@ -122,7 +122,7 @@ router.put('/todo-prios/:id', guard('ARCHIVE_MGR'), todoPrioRules(true), validat
 router.delete('/todo-prios/:id', guard('ARCHIVE_MGR'), asyncHandler(async (req, res) => { await S.removeTodoPrio(req.params.id); ok(res) }))
 
 // ---------- 预警规则（DASH_ALERT） ----------
-router.get('/alert-rules', guard('DASH_ALERT'), asyncHandler(async (req, res) => ok(res, await S.listAlertRules(req.scope, req.query.project))))
-router.put('/alert-rules', guard('DASH_ALERT'), alertRulePutRules, validate, checkBodyProjects, asyncHandler(async (req, res) => ok(res, await S.putAlertRule(req.body, req))))
+router.get('/alert-rules', guard('DASH_ALERT'), asyncHandler(async (req, res) => ok(res, await S.listAlertRules())))
+router.put('/alert-rules', guard('DASH_ALERT'), alertRulePutRules, validate, asyncHandler(async (req, res) => ok(res, await S.putAlertRule(req.body))))
 
 export default router

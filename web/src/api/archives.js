@@ -68,7 +68,7 @@ export const createTodoPrio = (d) => http.post('/archives/todo-prios', d)
 export const updateTodoPrio = (code, d) => http.put(`/archives/todo-prios/${code}`, d)
 export const deleteTodoPrio = (code) => http.delete(`/archives/todo-prios/${code}`)
 
-export const listAlertRules = (project) => http.get('/archives/alert-rules', project ? { params: { project } } : {})
+export const listAlertRules = () => http.get('/archives/alert-rules')
 export const putAlertRule = (d) => http.put('/archives/alert-rules', d)
 
 export const listRoles = () => http.get('/archives/roles')

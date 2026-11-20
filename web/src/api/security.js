@@ -1,6 +1,9 @@
 import http from './http'
 
-const projectParams = (project) => (project ? { params: { project } } : {})
+const projectParams = (project) => {
+  const codes = Array.isArray(project) ? project : (project ? [project] : [])
+  return codes.length ? { params: { project: codes.join(',') } } : {}
+}
 
 // 用户（SECURITY_MGR）
 export const listUsers = (project) => http.get('/archives/users', projectParams(project))
@@ -18,8 +21,8 @@ export const putRolePerms = (roleCode, permCodes) =>
 
 // 系统设置（SECURITY_MGR）
 export const getIssueExportLimit = (project) => http.get('/config/settings/issue-export-limit', projectParams(project))
-export const putIssueExportLimit = (value, projects) =>
-  http.put('/config/settings/issue-export-limit', { value, projects })
+export const putIssueExportLimit = (value) =>
+  http.put('/config/settings/issue-export-limit', { value })
 export const getDefaultUserPassword = (project) => http.get('/config/settings/default-user-password', projectParams(project))
-export const putDefaultUserPassword = (value, projects) =>
-  http.put('/config/settings/default-user-password', { value, projects })
+export const putDefaultUserPassword = (value) =>
+  http.put('/config/settings/default-user-password', { value })
