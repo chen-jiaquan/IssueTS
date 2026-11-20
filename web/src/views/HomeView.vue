@@ -4,10 +4,12 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
+import { ARCHIVE_ENTRY_PERMS, SECURITY_ENTRY_PERMS } from '@/permissionMenus'
 import http from '@/api/http'
 import { listNoticeTypes } from '@/api/archives'
 import ThemeSwitcher from '@/components/ThemeSwitcher.vue'
 import MultiCheckboxSelect from '@/components/MultiCheckboxSelect.vue'
+import CollapsibleList from '@/components/CollapsibleList.vue'
 import {
   getSummary, getAlerts, listNotices, createNotice, updateNotice, deleteNotice,
   listTodos, createTodo, updateTodo, deleteTodo,
@@ -15,6 +17,8 @@ import {
 
 const router = useRouter()
 const auth = useAuthStore()
+const canArchives = computed(() => auth.has(ARCHIVE_ENTRY_PERMS))
+const canSecurityEntry = computed(() => auth.has(SECURITY_ENTRY_PERMS))
 
 const summary = ref(null)
 const alerts = ref([])
@@ -30,7 +34,7 @@ const statsLoading = ref(false)
 const projectOptions = computed(() => cfgProjects.value.filter(
   (p) => !auth.scope || auth.scope.includes(p.code)))
 const projectSelectOptions = computed(() => projectOptions.value.map((p) => ({ value: p.code, label: p.name || p.code })))
-const scopedPerson = computed(() => auth.scope !== null && !!auth.user?.person)
+const scopedPerson = computed(() => auth.scope !== null && !auth.has('PROJECT_ALL') && !!auth.user?.person)
 const personOptions = computed(() => cfgPersonnel.value.map((p) => p.name).filter(Boolean))
 const groupOptions = computed(() => [...new Set(cfgPersonnel.value.map((p) => p.group).filter(Boolean))])
 
@@ -38,6 +42,7 @@ const filterParams = () => ({ project: filter.project.join(',') })
 const drillQuery = (extra = {}) => {
   const q = { ...extra }
   if (filter.project.length) q.project = filter.project.join(',')
+  if (scopedPerson.value) q.person = auth.user.person
   return q
 }
 function resetFilter() {
@@ -64,6 +69,24 @@ const resolvedRate = computed(() => {
 const LEVEL = { high: { type: 'danger', text: '高' }, mid: { type: 'warning', text: '中' }, low: { type: 'info', text: '低' } }
 const PRIO = { C: 'danger', H: 'warning', M: 'primary', L: 'info' }
 const PRIO_LABEL = { C: '关键', H: '高', M: '中', L: '低' }
+const ALERT_CATEGORIES = [
+  { key: 'overdue', label: '逾期未关闭' },
+  { key: 'highPause', label: '高优先级暂停' },
+  { key: 'custTest', label: '客户测试超时' },
+]
+const alertGroups = computed(() => {
+  const grouped = new Map(ALERT_CATEGORIES.map((c) => [c.key, []]))
+  for (const a of alerts.value) {
+    const key = grouped.has(a.type) ? a.type : 'other'
+    if (!grouped.has(key)) grouped.set(key, [])
+    grouped.get(key).push(a)
+  }
+  return [...grouped.entries()]
+    .filter(([, items]) => items.length)
+    .map(([key, items]) => ({ key, items, label: ALERT_CATEGORIES.find((c) => c.key === key)?.label || '其他预警' }))
+})
+const latestTodos = computed(() => [...todos.value].sort(
+  (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))))
 
 let statsSeq = 0
 async function loadStats() {
@@ -82,6 +105,7 @@ async function loadStats() {
   }
 }
 async function loadAll() {
+  if (!auth.has('DASH_VIEW')) return
   await loadStats()
   try {
     const [n, t] = await Promise.all([listNotices(), listTodos()])
@@ -185,10 +209,11 @@ onMounted(async () => {
     <div class="topbar">
       <span class="brand">问题跟踪系统</span>
       <div class="nav">
+        <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="router.push('/plan')">项目计划</el-button>
         <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="goIssues()">问题跟踪</el-button>
         <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="router.push('/stats')">统计报表</el-button>
-        <el-button v-if="auth.has('ARCHIVE_MGR')" size="small" @click="router.push('/archives')">基础档案设置</el-button>
-        <el-button v-if="auth.has('SECURITY_MGR') || auth.has('ARCHIVE_MGR') || auth.has('DASH_ALERT')" size="small" @click="router.push('/security')">用户与权限</el-button>
+        <el-button v-if="canArchives" size="small" @click="router.push('/archives')">基础档案设置</el-button>
+        <el-button v-if="canSecurityEntry" size="small" @click="router.push('/security')">用户与权限</el-button>
         <ThemeSwitcher />
         <el-dropdown>
           <el-button size="small">
@@ -216,15 +241,15 @@ onMounted(async () => {
 
     <!-- KPI -->
     <div class="kpis" v-loading="statsLoading">
-      <div class="kpi" @click="goIssues(drillQuery())">
+      <div class="kpi">
         <div class="num">{{ summary?.projectCount ?? '-' }}</div>
         <div class="lbl">{{ filter.project.length || scopedPerson ? '统计项目' : '可见项目' }}</div>
       </div>
-      <div class="kpi" @click="goIssues(drillQuery())">
+      <div class="kpi clickable" @click="goIssues(drillQuery())">
         <div class="num">{{ summary?.issueTotal ?? '-' }}</div>
         <div class="lbl">问题总数</div>
       </div>
-      <div class="kpi danger" @click="goIssues(drillQuery({ overdue: 1 }))">
+      <div class="kpi danger clickable" @click="goIssues(drillQuery({ overdue: 1 }))">
         <div class="num">{{ summary?.overdueCount ?? '-' }}</div>
         <div class="lbl">逾期未关闭</div>
       </div>
@@ -258,9 +283,19 @@ onMounted(async () => {
           <div class="hd"><span>预警事项</span><el-tag size="small" type="danger" effect="plain">{{ alerts.length }}</el-tag></div>
         </template>
         <div v-if="!alerts.length" class="empty">暂无预警</div>
-        <div v-for="(a, i) in alerts" :key="i" class="alert-item" @click="goIssues({ seq: a.issueSeq })">
-          <el-tag size="small" :type="LEVEL[a.level].type">{{ LEVEL[a.level].text }}</el-tag>
-          <span class="alert-text">{{ a.text }}</span>
+        <div v-for="g in alertGroups" :key="g.key" class="alert-group">
+          <div class="alert-group-hd">
+            <span>{{ g.label }}</span>
+            <el-tag size="small" effect="plain">{{ g.items.length }}</el-tag>
+          </div>
+          <CollapsibleList :items="g.items" :limit="6" empty-text="暂无该分类预警">
+            <template #item="{ item }">
+              <div class="alert-item" @click="goIssues(drillQuery({ seq: item.issueSeq }))">
+                <el-tag size="small" :type="LEVEL[item.level]?.type || 'info'">{{ LEVEL[item.level]?.text || item.level }}</el-tag>
+                <span class="alert-text">{{ item.text }}</span>
+              </div>
+            </template>
+          </CollapsibleList>
         </div>
       </el-card>
 
@@ -272,25 +307,28 @@ onMounted(async () => {
             <el-button v-if="auth.has('DASH_NOTICE')" size="small" type="primary" plain @click="openNotice()">新增</el-button>
           </div>
         </template>
-        <div v-if="!notices.length" class="empty">暂无通知</div>
-        <div v-for="n in notices" :key="n.id" class="notice-item">
-          <div class="notice-main">
-            <div class="notice-title">
-              <el-tag v-if="n.pinned" size="small" type="danger" effect="dark" style="margin-right:6px">置顶</el-tag>
-              <el-tag v-for="p in (n.projects || [])" :key="p" size="small" effect="plain" style="margin-right:6px">{{ p }}</el-tag>
-              <el-tag v-if="n.type" size="small" effect="plain" style="margin-right:6px">{{ n.type }}</el-tag>
-              {{ n.title }}
+        <CollapsibleList :items="notices" :limit="6" empty-text="暂无通知">
+          <template #item="{ item: n }">
+            <div :key="n.id" class="notice-item">
+              <div class="notice-main">
+                <div class="notice-title">
+                  <el-tag v-if="n.pinned" size="small" type="danger" effect="dark" style="margin-right:6px">置顶</el-tag>
+                  <el-tag v-for="p in (n.projects || [])" :key="p" size="small" effect="plain" style="margin-right:6px">{{ p }}</el-tag>
+                  <el-tag v-if="n.type" size="small" effect="plain" style="margin-right:6px">{{ n.type }}</el-tag>
+                  {{ n.title }}
+                </div>
+                <div class="notice-meta">
+                  {{ fmtDate(n.date) }} · {{ n.created_by || '系统' }}<template v-if="noticeAudience(n)"> · {{ noticeAudience(n) }}</template>
+                </div>
+                <div v-if="n.content" class="notice-content">{{ n.content }}</div>
+              </div>
+              <div v-if="auth.has('DASH_NOTICE')" class="notice-ops">
+                <el-button link size="small" @click="openNotice(n)">编辑</el-button>
+                <el-button link size="small" type="danger" @click="removeNotice(n)">删除</el-button>
+              </div>
             </div>
-            <div class="notice-meta">
-              {{ fmtDate(n.date) }} · {{ n.created_by || '系统' }}<template v-if="noticeAudience(n)"> · {{ noticeAudience(n) }}</template>
-            </div>
-            <div v-if="n.content" class="notice-content">{{ n.content }}</div>
-          </div>
-          <div v-if="auth.has('DASH_NOTICE')" class="notice-ops">
-            <el-button link size="small" @click="openNotice(n)">编辑</el-button>
-            <el-button link size="small" type="danger" @click="removeNotice(n)">删除</el-button>
-          </div>
-        </div>
+          </template>
+        </CollapsibleList>
       </el-card>
 
       <!-- 我的待办 -->
@@ -301,23 +339,26 @@ onMounted(async () => {
             <el-button v-if="auth.has('DASH_TODO')" size="small" type="primary" plain @click="openTodo()">新增</el-button>
           </div>
         </template>
-        <div v-if="!todos.length" class="empty">暂无待办</div>
-        <div v-for="t in todos" :key="t.id" class="todo-item" :class="{ done: t.done }">
-          <el-checkbox :model-value="t.done" :disabled="!auth.has('DASH_TODO')" @change="t.done = $event; toggleTodo(t)" />
-          <div class="todo-main">
-            <div class="todo-text">{{ t.text }}</div>
-            <div class="todo-meta">
-              <el-tag size="small" :type="PRIO[t.prio] || 'info'" effect="plain">{{ PRIO_LABEL[t.prio] || t.prio }}</el-tag>
-              <el-tag v-for="p in (t.projects || [])" :key="p" size="small" effect="plain">{{ p }}</el-tag>
-              <span v-if="t.owner"> · {{ t.owner }}</span>
-              <span v-if="t.due"> · 截止 {{ fmtDate(t.due) }}</span>
+        <CollapsibleList :items="latestTodos" :limit="6" empty-text="暂无待办">
+          <template #item="{ item: t }">
+            <div :key="t.id" class="todo-item" :class="{ done: t.done }">
+              <el-checkbox :model-value="t.done" :disabled="!auth.has('DASH_TODO')" @change="t.done = $event; toggleTodo(t)" />
+              <div class="todo-main">
+                <div class="todo-text">{{ t.text }}</div>
+                <div class="todo-meta">
+                  <el-tag size="small" :type="PRIO[t.prio] || 'info'" effect="plain">{{ PRIO_LABEL[t.prio] || t.prio }}</el-tag>
+                  <el-tag v-for="p in (t.projects || [])" :key="p" size="small" effect="plain">{{ p }}</el-tag>
+                  <span v-if="t.owner"> · {{ t.owner }}</span>
+                  <span v-if="t.due"> · 截止 {{ fmtDate(t.due) }}</span>
+                </div>
+              </div>
+              <div v-if="auth.has('DASH_TODO')" class="todo-ops">
+                <el-button link size="small" @click="openTodo(t)">编辑</el-button>
+                <el-button link size="small" type="danger" @click="removeTodo(t)">删除</el-button>
+              </div>
             </div>
-          </div>
-          <div v-if="auth.has('DASH_TODO')" class="todo-ops">
-            <el-button link size="small" @click="openTodo(t)">编辑</el-button>
-            <el-button link size="small" type="danger" @click="removeTodo(t)">删除</el-button>
-          </div>
-        </div>
+          </template>
+        </CollapsibleList>
       </el-card>
     </div>
 
@@ -380,8 +421,9 @@ onMounted(async () => {
 .brand { font-size: 18px; font-weight: 600; }
 .nav { display: flex; gap: 8px; align-items: center; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 12px; }
-.kpi { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 14px 16px; cursor: pointer; transition: box-shadow .2s; }
-.kpi:hover { box-shadow: var(--el-box-shadow-light); }
+.kpi { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 14px 16px; transition: box-shadow .2s; }
+.kpi.clickable { cursor: pointer; }
+.kpi.clickable:hover { box-shadow: var(--el-box-shadow-light); }
 .kpi .num { font-size: 26px; font-weight: 700; color: var(--el-color-primary); }
 .kpi.danger .num { color: var(--el-color-danger); }
 .kpi .lbl { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px; }
@@ -396,6 +438,8 @@ onMounted(async () => {
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .hd { display: flex; justify-content: space-between; align-items: center; }
 .empty { color: var(--el-text-color-disabled); font-size: 13px; padding: 12px 0; }
+.alert-group + .alert-group { margin-top: 10px; }
+.alert-group-hd { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); margin-bottom: 4px; }
 .alert-item { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px dashed var(--el-border-color-lighter); cursor: pointer; }
 .alert-text { font-size: 13px; line-height: 1.5; }
 .notice-item { display: flex; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px dashed var(--el-border-color-lighter); }

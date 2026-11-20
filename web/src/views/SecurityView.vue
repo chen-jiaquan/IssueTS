@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '@/components/BackHome.vue'
 import http from '@/api/http'
 import { useAuthStore } from '@/store/auth'
+import { SECURITY_TAB_PERM } from '@/permissionMenus'
 import {
   listUsers, createUser, updateUser, deleteUser,
   listRoles, listPermissions, updatePermission, getRolePerms, putRolePerms,
@@ -15,18 +16,25 @@ import {
 } from '@/api/archives'
 
 const auth = useAuthStore()
-const canSecurity = auth.has('SECURITY_MGR')
-const canArchive = auth.has('ARCHIVE_MGR')
-const canAlert = auth.has('DASH_ALERT')
-const tab = ref(canSecurity ? 'users' : canArchive ? 'roles' : 'alerts')
-
 const isSystemAdminRole = (code, name) => code === 'R01' || name === '管理员'
 const currentIsSystemAdmin = computed(() => isSystemAdminRole(auth.user?.role_code, auth.user?.role))
-const requiresProject = (targetRole = null) =>
-  targetRole ? !isSystemAdminRole(targetRole.code, targetRole.name) : !currentIsSystemAdmin.value
+// 二级菜单权限（一级总权限已移除，统一按页签级权限位判断）。
+const canUsers = auth.has(SECURITY_TAB_PERM.users)
+const canRoles = auth.has(SECURITY_TAB_PERM.roles)
+// 权限位菜单仅系统管理员角色可见（不再仅凭权限位判断）。
+const canPerms = currentIsSystemAdmin.value
+const canMatrix = auth.has(SECURITY_TAB_PERM.matrix)
+const canAlerts = auth.has(['DASH_ALERT', SECURITY_TAB_PERM.alerts])
+const canSettings = auth.has(SECURITY_TAB_PERM.settings)
+const canSecurity = canUsers || canMatrix || canSettings
+const canArchive = canRoles || canPerms
+const canAlert = canAlerts
+const tab = ref(canUsers ? 'users' : canRoles ? 'roles' : canPerms ? 'permissions'
+  : canMatrix ? 'matrix' : canAlerts ? 'alerts' : canSettings ? 'settings' : 'users')
 
 // ---------- 基础数据 ----------
 const users = ref([])
+const allUsers = ref([])
 const roles = ref([])
 const perms = ref([])
 const alertRules = ref([])
@@ -75,21 +83,23 @@ async function loadBase() {
   ])
   projects.value = prj.filter((x) => x.enabled !== false)
   personnelNames.value = pers.filter((x) => x.enabled !== false).map((x) => x.name)
-  if (canArchive || canSecurity) {
-    const [r, p] = await Promise.all([listRoles(), listPermissions()])
-    roles.value = r
-    perms.value = p
+  // 角色列表与权限字典独立加载：任一接口失败不影响另一份数据（矩阵页需要两者）。
+  if (canRoles || canMatrix) {
+    try { roles.value = await listRoles() } catch { /* 单页签加载失败不阻断其他数据 */ }
   }
-  if (canAlert) alertRules.value = await listAlertRules()
+  if (canPerms || canMatrix || canRoles) {
+    try { perms.value = await listPermissions() } catch { /* 权限字典加载失败单独处理 */ }
+  }
+  if (canAlerts) alertRules.value = await listAlertRules()
 }
 
 async function loadRoles() {
-  if (!canArchive && !canSecurity) return
+  if (!canRoles && !canMatrix) return
   roles.value = await listRoles()
 }
 
 async function loadAlerts() {
-  if (!canAlert) return
+  if (!canAlerts) return
   alertRules.value = await listAlertRules()
 }
 
@@ -98,8 +108,16 @@ const roleDialog = ref(false)
 const editingRole = ref(null)
 const roleForm = reactive({ code: '', name: '', desc: '', external: false, color: '', preset: false, projects: [] })
 const roleSaving = ref(false)
+// 与用户管理一致：按当前登录账号角色判断所属项目必填。
+const roleProjectRequired = computed(() => !currentIsSystemAdmin.value)
+const roleProjectPlaceholder = computed(() =>
+  roleProjectRequired.value ? '所属项目必填，请选择' : '当前管理员账号可不填')
+
+// 系统预置角色（R01~R05）不允许编辑和删除。
+const isProtectedRole = (row) => !!row?.preset
 
 function openRole(row = null) {
+  if (isProtectedRole(row)) return ElMessage.warning('系统预置角色不允许编辑')
   editingRole.value = row
   Object.assign(roleForm, row
     ? { code: row.code, name: row.name, desc: row.desc || '', external: !!row.external, color: row.color || '', preset: !!row.preset, projects: [...(row.projects || [])] }
@@ -108,9 +126,10 @@ function openRole(row = null) {
 }
 
 async function saveRoleArchive() {
+  if (isProtectedRole(editingRole.value)) return ElMessage.warning('系统预置角色不允许编辑')
   if (!roleForm.code.trim()) return ElMessage.warning('编码必填')
   if (!roleForm.name.trim()) return ElMessage.warning('角色名必填')
-  if (requiresProject(roleForm) && !roleForm.projects.length) return ElMessage.warning('所属项目必填')
+  if (roleProjectRequired.value && !roleForm.projects.length) return ElMessage.warning('所属项目必填')
   roleSaving.value = true
   try {
     const payload = { ...roleForm }
@@ -127,6 +146,7 @@ async function saveRoleArchive() {
 }
 
 async function removeRole(row) {
+  if (isProtectedRole(row)) return ElMessage.warning('系统预置角色不允许删除')
   await ElMessageBox.confirm(`确认删除角色「${row.name}」？删除不可恢复。`, '删除', { type: 'warning' })
   try {
     await deleteRole(row.code)
@@ -137,12 +157,12 @@ async function removeRole(row) {
   }
 }
 
-async function togglePermPreset(row) {
+async function togglePermNoAssign(row) {
   try {
-    await updatePermission(row.code, { code: row.code, preset: !!row.preset })
-    ElMessage.success('已保存')
+    await updatePermission(row.code, { code: row.code, no_assign: !!row.no_assign })
+    ElMessage.success(row.no_assign ? '已设为禁止分配，将清除已有授权' : '已允许分配')
   } catch (e) {
-    row.preset = !row.preset
+    row.no_assign = !row.no_assign
     ElMessage.error(e.message)
   }
 }
@@ -165,12 +185,17 @@ async function saveAlertRule(row) {
 }
 
 async function loadUsers() {
-  if (!canSecurity) return
+  if (!canUsers) return
   users.value = await listUsers(usersProjectFilter.value)
 }
 
+async function loadAllUsers() {
+  if (!canUsers) return
+  allUsers.value = await listUsers()
+}
+
 async function loadMatrix() {
-  if (!canSecurity) return
+  if (!canMatrix) return
   const rows = await getRolePerms()
   for (const r of roles.value) matrix[r.code] = new Set()
   for (const row of rows) (matrix[row.role_code] ??= new Set()).add(row.perm_code)
@@ -180,35 +205,60 @@ async function loadMatrix() {
 const userDialog = ref(false)
 const editingUser = ref(null)
 const userForm = reactive({ username: '', password: '', person: '', role_code: '', status: '启用', projects: [], preset: false })
-const selectedUserRole = computed(() => roles.value.find((r) => r.code === userForm.role_code))
+const isPersonnelUser = computed(() => !!editingUser.value?.personnel_code)
+const isProtectedUser = (row) => !!row && (row.username === 'admin' || !!row.preset)
+// 管理员角色（R01）仅系统预置 admin 账号可用：新增或编辑其他用户时不提供该选项。
+const canAssignAdminRole = computed(() => editingUser.value?.username === 'admin')
+const selectableRoles = computed(() => canAssignAdminRole.value
+  ? roles.value
+  : roles.value.filter((r) => !isSystemAdminRole(r.code, r.name)))
+// 用户管理按当前登录账号角色判断：系统管理员可不填，其余登录角色必填。
+const userProjectRequired = computed(() => !currentIsSystemAdmin.value)
+const userProjectPlaceholder = computed(() =>
+  userProjectRequired.value ? '所属项目必填，请选择' : '当前管理员账号可不填')
 
 function openUser(row = null) {
   editingUser.value = row
   Object.assign(userForm, row
     ? { username: row.username, password: '', person: row.person || '', role_code: row.role_code, status: row.status, projects: [...(row.projects || [])], preset: !!row.preset }
-    : { username: '', password: '', person: '', role_code: roles.value[0]?.code ?? '', status: '启用', projects: [], preset: false })
+    : { username: '', password: '', person: '', role_code: selectableRoles.value[0]?.code ?? '', status: '启用', projects: [], preset: false })
   userDialog.value = true
 }
 
 async function saveUser() {
   if (!userForm.username.trim()) return ElMessage.warning('用户名必填')
   if (!userForm.role_code) return ElMessage.warning('角色必填')
+  if (!canAssignAdminRole.value) {
+    const chosen = roles.value.find((r) => r.code === userForm.role_code)
+    if (chosen && isSystemAdminRole(chosen.code, chosen.name)) return ElMessage.warning('管理员角色仅系统预置 admin 账号可用')
+  }
   if (!editingUser.value && (userForm.password || '').length < 6) return ElMessage.warning('密码至少 6 位')
-  if (requiresProject(selectedUserRole.value) && !userForm.projects.length) return ElMessage.warning('所属项目必填')
+  const name = String(userForm.person || '').trim()
+  const duplicate = allUsers.value.find((u) =>
+    Number(u.id) !== Number(editingUser.value?.id)
+    && String(u.person ?? '').trim().toLowerCase() === name.toLowerCase())
+  if (name && duplicate) return ElMessage.warning(`姓名「${name}」已存在，不允许重复`)
+  if (userProjectRequired.value && !userForm.projects.length) return ElMessage.warning('所属项目必填')
   const payload = { ...userForm }
-  if (!editingUser.value) {
-    await createUser(payload)
-    ElMessage.success('用户已创建')
-  } else {
-    if (!payload.password) delete payload.password
-    await updateUser(editingUser.value.id, payload)
-    ElMessage.success('用户已更新')
+  try {
+    if (!editingUser.value) {
+      await createUser(payload)
+      ElMessage.success('用户已创建')
+    } else {
+      if (!payload.password) delete payload.password
+      await updateUser(editingUser.value.id, payload)
+      ElMessage.success('用户已更新')
+    }
+  } catch (e) {
+    return ElMessage.error(e.message)
   }
   userDialog.value = false
-  loadUsers()
+  await loadAllUsers()
+  await loadUsers()
 }
 
 async function toggleStatus(row) {
+  if (isProtectedUser(row)) return ElMessage.warning('系统预置账号不允许停用')
   await updateUser(row.id, { ...row, status: row.status === '启用' ? '停用' : '启用', password: undefined })
   ElMessage.success(`已${row.status === '启用' ? '停用' : '启用'} ${row.username}`)
   loadUsers()
@@ -224,6 +274,7 @@ async function resetPassword(row) {
 }
 
 async function removeUser(row) {
+  if (isProtectedUser(row)) return ElMessage.warning('系统预置账号不允许删除')
   await ElMessageBox.confirm(`确认删除用户 ${row.username}？`, '删除用户', { type: 'warning' })
   await deleteUser(row.id)
   ElMessage.success('已删除')
@@ -241,22 +292,32 @@ const permGroups = computed(() => {
   return [...map.entries()]
 })
 
+// 管理员角色（R01）的权限列仅系统管理员角色可修改。
+const canEditRolePerms = (roleCode) => !isSystemAdminRole(roleCode) || currentIsSystemAdmin.value
+
 function togglePerm(roleCode, permCode, checked) {
+  if (!canEditRolePerms(roleCode)) return
   if (!matrix[roleCode]) matrix[roleCode] = new Set()
   if (checked) matrix[roleCode].add(permCode)
   else matrix[roleCode].delete(permCode)
 }
 
-const roleHasAll = (roleCode) => perms.value.length > 0 && matrix[roleCode]?.size === perms.value.length
+const assignablePerms = computed(() => perms.value.filter((p) => !p.no_assign))
+const roleHasAll = (roleCode) => assignablePerms.value.length > 0
+  && assignablePerms.value.every((p) => matrix[roleCode]?.has(p.code))
 const setRoleAll = (roleCode) => {
-  matrix[roleCode] = new Set(roleHasAll(roleCode) ? [] : perms.value.map((p) => p.code))
+  if (!canEditRolePerms(roleCode)) return
+  matrix[roleCode] = new Set(roleHasAll(roleCode) ? [] : assignablePerms.value.map((p) => p.code))
 }
 
 async function saveRole(roleCode) {
+  if (!canEditRolePerms(roleCode)) return ElMessage.warning('管理员角色的权限仅系统管理员角色可修改')
   savingRole.value = roleCode
   try {
-    await putRolePerms(roleCode, [...(matrix[roleCode] || [])])
-    ElMessage.success(`${roleName(roleCode)} 权限已保存（${matrix[roleCode]?.size || 0} 项）`)
+    const assignable = new Set(assignablePerms.value.map((p) => p.code))
+    const codes = [...(matrix[roleCode] || [])].filter((c) => assignable.has(c))
+    await putRolePerms(roleCode, codes)
+    ElMessage.success(`${roleName(roleCode)} 权限已保存（${codes.length} 项）`)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -264,7 +325,7 @@ async function saveRole(roleCode) {
   }
 }
 
-const rowsOfRole = (roleCode) => matrix[roleCode]?.size ?? 0
+const rowsOfRole = (roleCode) => assignablePerms.value.filter((p) => matrix[roleCode]?.has(p.code)).length
 
 // ---------- 系统设置 ----------
 const exportLimit = ref(0)
@@ -273,7 +334,7 @@ const settingsSaving = ref(false)
 const passwordSaving = ref(false)
 
 async function loadSettings() {
-  if (!canSecurity) return
+  if (!canSettings) return
   const [limit, password] = await Promise.all([getIssueExportLimit(), getDefaultUserPassword()])
   exportLimit.value = limit
   defaultPassword.value = password
@@ -314,7 +375,7 @@ onMounted(async () => {
   loading.value = true
   try {
     await loadBase()
-    await Promise.all([loadUsers(), loadMatrix(), loadSettings()])
+    await Promise.all([loadUsers(), loadAllUsers(), loadMatrix(), loadSettings()])
   } catch (e) {
     ElMessage.error(e.message || '加载失败')
   } finally {
@@ -328,7 +389,7 @@ onMounted(async () => {
     <div style="margin-bottom:10px"><BackHome /></div>
     <el-tabs v-model="tab" v-loading="loading">
       <!-- ========== 用户管理 ========== -->
-      <el-tab-pane v-if="canSecurity" label="用户管理" name="users">
+      <el-tab-pane v-if="canUsers" label="用户管理" name="users">
         <div class="toolbar">
           <el-button type="primary" @click="openUser()">新增用户</el-button>
           <el-select v-model="usersProjectFilter" multiple collapse-tags clearable placeholder="按所属项目过滤" style="width:240px" @change="loadUsers">
@@ -337,7 +398,7 @@ onMounted(async () => {
           <span class="tip">共 {{ filteredUsers.length }} 个账号（密码 bcrypt 存储，不回显）</span>
         </div>
         <el-table :data="filteredUsers" size="small" border stripe max-height="calc(100vh - 230px)">
-          <el-table-column prop="username" label="用户名" width="130" />
+          <el-table-column prop="username" label="编码" width="130" />
           <el-table-column prop="person" label="姓名" width="110" />
           <el-table-column label="系统预置" width="100">
             <template #default="{ row }">{{ row.preset ? '是' : '否' }}</template>
@@ -361,17 +422,20 @@ onMounted(async () => {
             <template #default="{ row }">
               <el-button link size="small" type="primary" @click="openUser(row)">编辑</el-button>
               <el-button link size="small" @click="resetPassword(row)">重置密码</el-button>
-              <el-button link size="small" :type="row.status === '启用' ? 'warning' : 'success'" @click="toggleStatus(row)">
+              <el-button link size="small" :type="row.status === '启用' ? 'warning' : 'success'"
+                :disabled="isProtectedUser(row)" :title="isProtectedUser(row) ? '系统预置账号不允许停用' : ''"
+                @click="toggleStatus(row)">
                 {{ row.status === '启用' ? '停用' : '启用' }}
               </el-button>
-              <el-button link size="small" type="danger" @click="removeUser(row)">删除</el-button>
+              <el-button link size="small" type="danger" :disabled="isProtectedUser(row)"
+                :title="isProtectedUser(row) ? '系统预置账号不允许删除' : ''" @click="removeUser(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
       </el-tab-pane>
 
       <!-- ========== 角色档案 ========== -->
-      <el-tab-pane v-if="canArchive" label="角色" name="roles">
+      <el-tab-pane v-if="canRoles" label="角色" name="roles">
         <div class="toolbar">
           <el-button type="primary" @click="openRole()">新增角色</el-button>
           <el-select v-model="rolesProjectFilter" multiple collapse-tags clearable placeholder="按所属项目过滤" style="width:240px" @change="loadRoles">
@@ -402,23 +466,25 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column label="操作" width="130" fixed="right">
             <template #default="{ row }">
-              <el-button link size="small" type="primary" @click="openRole(row)">编辑</el-button>
-              <el-button link size="small" type="danger" @click="removeRole(row)">删除</el-button>
+              <el-button link size="small" type="primary" :disabled="isProtectedRole(row)"
+                :title="isProtectedRole(row) ? '系统预置角色不允许编辑' : ''" @click="openRole(row)">编辑</el-button>
+              <el-button link size="small" type="danger" :disabled="isProtectedRole(row)"
+                :title="isProtectedRole(row) ? '系统预置角色不允许删除' : ''" @click="removeRole(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
       </el-tab-pane>
 
       <!-- ========== 权限位（只读） ========== -->
-      <el-tab-pane v-if="canArchive" label="权限位" name="permissions">
-        <div class="toolbar"><span class="tip">权限位只读；授权在「角色权限」页签维护</span></div>
+      <el-tab-pane v-if="canPerms" label="权限位" name="permissions">
+        <div class="toolbar"><span class="tip">可切换「禁止分配」开关；禁止分配的权限不可在「角色权限」页签授权，勾选时将清除其已有授权</span></div>
         <el-table :data="perms" size="small" border stripe max-height="calc(100vh - 230px)">
           <el-table-column prop="code" label="编码" width="150" />
           <el-table-column prop="module" label="模块" width="120" />
           <el-table-column prop="name" label="名称" width="200" />
-          <el-table-column label="系统预置" width="100">
+          <el-table-column label="禁止分配" width="100">
             <template #default="{ row }">
-              <el-switch v-model="row.preset" :disabled="!canArchive" @change="togglePermPreset(row)" />
+              <el-switch v-model="row.no_assign" :disabled="!canPerms" @change="togglePermNoAssign(row)" />
             </template>
           </el-table-column>
           <el-table-column prop="desc" label="描述" />
@@ -426,7 +492,7 @@ onMounted(async () => {
       </el-tab-pane>
 
       <!-- ========== 角色权限矩阵 ========== -->
-      <el-tab-pane v-if="canSecurity" label="角色权限" name="matrix">
+      <el-tab-pane v-if="canMatrix" label="角色权限" name="matrix">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
           title="勾选即生效前需点列头「保存」；权限变更后用户下次登录/刷新档案生效" />
         <div class="matrix-wrap">
@@ -437,10 +503,13 @@ onMounted(async () => {
                 <th v-for="r in roles" :key="r.code">
                   <div class="role-hd">
                     <div>{{ r.code }} {{ r.name }}</div>
-                    <div class="role-sub">{{ rowsOfRole(r.code) }}/{{ perms.length }} 项</div>
+                    <div class="role-sub">{{ rowsOfRole(r.code) }}/{{ assignablePerms.length }} 项</div>
                     <div class="role-ops">
-                      <el-button link size="small" @click="setRoleAll(r.code)">{{ roleHasAll(r.code) ? '清空' : '全选' }}</el-button>
-                      <el-button link size="small" type="primary" :loading="savingRole === r.code" @click="saveRole(r.code)">保存</el-button>
+                      <el-button link size="small" :disabled="!canEditRolePerms(r.code)"
+                        :title="!canEditRolePerms(r.code) ? '管理员角色的权限仅系统管理员角色可修改' : ''"
+                        @click="setRoleAll(r.code)">{{ roleHasAll(r.code) ? '清空' : '全选' }}</el-button>
+                      <el-button link size="small" type="primary" :disabled="!canEditRolePerms(r.code)"
+                        :loading="savingRole === r.code" @click="saveRole(r.code)">保存</el-button>
                     </div>
                   </div>
                 </th>
@@ -451,14 +520,18 @@ onMounted(async () => {
                 <tr class="group-row">
                   <td :colspan="roles.length + 1">{{ mod }}</td>
                 </tr>
-                <tr v-for="p in list" :key="p.code">
+                <tr v-for="p in list" :key="p.code" :class="{ 'no-assign-row': p.no_assign }">
                   <td class="first">
                     <span class="code">{{ p.code }}</span>
                     <span class="name">{{ p.name }}</span>
+                    <span v-if="p.no_assign" class="no-assign-tag">禁止分配</span>
                     <div v-if="p.desc" class="desc">{{ p.desc }}</div>
                   </td>
                   <td v-for="r in roles" :key="r.code" class="cell">
                     <el-checkbox :model-value="matrix[r.code]?.has(p.code)"
+                      :disabled="!!p.no_assign || !canEditRolePerms(r.code)"
+                      :title="p.no_assign ? '该权限已设为禁止分配，不可在此授权'
+                        : (!canEditRolePerms(r.code) ? '管理员角色的权限仅系统管理员角色可修改' : '')"
                       @change="(v) => togglePerm(r.code, p.code, v)" />
                   </td>
                 </tr>
@@ -469,7 +542,7 @@ onMounted(async () => {
       </el-tab-pane>
 
       <!-- ========== 预警规则 ========== -->
-      <el-tab-pane v-if="canAlert" label="预警规则" name="alerts">
+      <el-tab-pane v-if="canAlerts" label="预警规则" name="alerts">
         <div class="toolbar">
           <span class="tip">启用后规则在首页工作台「预警事项」实时生效；custTest 的天数为已解决后未完成客户测试的容忍天数</span>
         </div>
@@ -495,7 +568,7 @@ onMounted(async () => {
       </el-tab-pane>
 
       <!-- ========== 系统设置 ========== -->
-      <el-tab-pane v-if="canSecurity" label="系统设置" name="settings">
+      <el-tab-pane v-if="canSettings" label="系统设置" name="settings">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
           title="导出上限控制问题列表导出行数；默认密码用于人员档案自动下推生成的用户账号初始密码。" />
         <el-form label-width="140px" style="max-width: 560px">
@@ -526,6 +599,8 @@ onMounted(async () => {
 
     <!-- 用户编辑 -->
     <el-dialog v-model="userDialog" :title="editingUser ? `编辑用户 ${editingUser.username}` : '新增用户'" width="520px">
+      <el-alert v-if="isPersonnelUser" type="info" :closable="false" show-icon style="margin-bottom:12px"
+        :title="`该账号由人员档案 ${editingUser.personnel_code} 下推，用户名/姓名/所属项目请在人员档案中修改后同步`" />
       <el-form :model="userForm" label-width="90px">
         <el-form-item label="用户名" required>
           <el-input v-model="userForm.username" :disabled="!!editingUser" placeholder="登录账号" />
@@ -535,20 +610,30 @@ onMounted(async () => {
             :placeholder="editingUser ? '留空则不修改' : '至少 6 位'" />
         </el-form-item>
         <el-form-item label="姓名">
-          <el-select v-model="userForm.person" filterable allow-create clearable style="width:100%" placeholder="关联人员档案">
-            <el-option v-for="n in personnelNames" :key="n" :value="n" :label="n" />
-          </el-select>
+          <div style="width:100%">
+            <el-select v-model="userForm.person" filterable allow-create clearable :disabled="isPersonnelUser"
+              style="width:100%" placeholder="姓名不允许重复">
+              <el-option v-for="n in personnelNames" :key="n" :value="n" :label="n" />
+            </el-select>
+            <div class="tip" style="margin-top:4px">姓名不允许重复；人员下推账号请在人员档案中修改</div>
+          </div>
         </el-form-item>
         <el-form-item label="角色" required>
           <el-select v-model="userForm.role_code" style="width:100%">
-            <el-option v-for="r in roles" :key="r.code" :value="r.code" :label="`${r.code} ${r.name}`" />
+            <el-option v-for="r in selectableRoles" :key="r.code" :value="r.code" :label="`${r.code} ${r.name}`" />
           </el-select>
         </el-form-item>
-        <el-form-item label="所属项目" :required="requiresProject(selectedUserRole)">
-          <el-select v-model="userForm.projects" multiple filterable collapse-tags clearable style="width:100%"
-            placeholder="选择所属项目">
-            <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
-          </el-select>
+        <el-form-item label="所属项目" :required="userProjectRequired">
+          <div style="width:100%">
+            <el-select v-model="userForm.projects" multiple filterable collapse-tags clearable :disabled="isPersonnelUser"
+              style="width:100%" :placeholder="userProjectPlaceholder">
+              <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
+            </el-select>
+            <div class="tip" style="margin-top:4px">
+              {{ userProjectRequired ? '当前登录角色非系统管理员，所属项目必填' : '当前登录角色为系统管理员，可不填' }}
+              <span v-if="isPersonnelUser">；人员下推账号请到人员档案修改</span>
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="状态">
           <el-radio-group v-model="userForm.status">
@@ -575,10 +660,16 @@ onMounted(async () => {
         <el-form-item label="角色名" required>
           <el-input v-model="roleForm.name" />
         </el-form-item>
-        <el-form-item label="所属项目" :required="requiresProject(roleForm)">
-          <el-select v-model="roleForm.projects" multiple filterable style="width:100%" placeholder="选择所属项目；系统管理员角色可留空">
-            <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
-          </el-select>
+        <el-form-item label="所属项目" :required="roleProjectRequired">
+          <div style="width:100%">
+            <el-select v-model="roleForm.projects" multiple filterable collapse-tags clearable style="width:100%"
+              :placeholder="roleProjectPlaceholder">
+              <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
+            </el-select>
+            <div class="tip" style="margin-top:4px">
+              {{ roleProjectRequired ? '当前登录角色非系统管理员，所属项目必填' : '当前登录角色为系统管理员，可不填' }}
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="roleForm.desc" type="textarea" :rows="2" />
@@ -618,4 +709,6 @@ onMounted(async () => {
 .code { font-family: monospace; color: var(--el-color-primary); margin-right: 6px; }
 .name { font-weight: 500; }
 .desc { font-size: 11px; color: var(--el-text-color-secondary); }
+.no-assign-row { opacity: 0.6; }
+.no-assign-tag { margin-left: 6px; font-size: 11px; color: var(--el-color-danger); border: 1px solid var(--el-color-danger); border-radius: 3px; padding: 0 4px; }
 </style>

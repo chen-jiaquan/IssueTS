@@ -91,6 +91,11 @@ function buildIssueWhere(query, scope) {
     params.push(scope)
     whereClauses.push(`project = ANY($${params.length})`)
   }
+  // 工作台下钻：负责人/开发负责人/提交人任一命中，保证明细与首页统计一致
+  if (query.person) {
+    const idx = params.push(query.person)
+    whereClauses.push(`(owner = $${idx} OR developer = $${idx} OR reporter = $${idx})`)
+  }
   // 文本/枚举列（表头多选筛选，含空值选项）
   for (const key of ['project', 'stage', 'type', 'module', 'priority', 'impact', 'status', 'pending_test', 'customer_test', 'reporter', 'owner', 'developer']) {
     if (query[key] !== undefined && query[key] !== '') addMultiFilter(whereClauses, params, key, query[key])

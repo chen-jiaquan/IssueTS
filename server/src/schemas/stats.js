@@ -3,7 +3,7 @@ import { query, body, param } from 'express-validator'
 
 export const pivotRules = [
   query('dim').optional().isIn(['owner', 'project', 'status', 'module', 'priority', 'type']).withMessage('维度非法'),
-  query('personField').optional().isIn(['owner', 'developer']),
+  query('personField').optional().isIn(['owner', 'developer', 'reporter']),
   query('timeField').optional().isIn(['planEnd', 'resolvedAt']),
   query('granularity').optional().isIn(['day', 'week', 'month']),
   query('project').optional().isString(),

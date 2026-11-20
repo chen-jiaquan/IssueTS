@@ -9,6 +9,7 @@ import upload from './upload.js'
 import logs from './logs.js'
 import notices from './notices.js'
 import todos from './todos.js'
+import projectPlans from './projectPlans.js'
 
 const router = Router()
 
@@ -21,6 +22,7 @@ router.use('/upload', upload)
 router.use('/logs', logs)
 router.use('/notices', notices)
 router.use('/todos', todos)
+router.use('/project-plans', projectPlans)
 router.use('/issues', issues)
 router.use('/stats', stats)
 router.use('/home', home)

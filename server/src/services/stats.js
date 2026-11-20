@@ -51,7 +51,9 @@ const cacheSet = (key, value) => cache.set(key, { expires: Date.now() + TTL, val
 // ---------- 透视 ----------
 export async function pivot(query, scope) {
   const dim = query.dim || 'owner'
-  const personField = dim === 'owner' ? (query.personField === 'developer' ? 'developer' : 'owner') : null
+  const personField = dim === 'owner'
+    ? ({ developer: 'developer', reporter: 'reporter' }[query.personField] ?? 'owner')
+    : null
   const field = dim === 'owner' ? personField : DIM_FIELD[dim]
   const timeField = TIME_FIELD[query.timeField || 'planEnd']
   const gran = query.granularity || 'month'
@@ -104,7 +106,7 @@ export async function exportPivot(query, scope, charts = []) {
   const data = await pivot(query, scope)
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('统计透视')
-  const dimLabel = { owner: data.personField === 'developer' ? '开发人员' : '负责人', project: '项目', status: '状态', module: '模块', priority: '优先级', type: '类型' }[data.dim]
+  const dimLabel = { owner: ({ developer: '开发人员', reporter: '提交人' }[data.personField] ?? '负责人'), project: '项目', status: '状态', module: '模块', priority: '优先级', type: '类型' }[data.dim]
   const colHeaders = [...data.cols, '合计']
   ws.columns = [
     { header: dimLabel, key: 'row', width: 20 },

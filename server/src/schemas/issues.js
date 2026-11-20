@@ -85,6 +85,7 @@ export const listQueryRules = [
   query('timeField').optional().isIn(['planEnd', 'resolvedAt']),
   query('dateFrom').optional({ checkFalsy: true }).matches(DATE_RE),
   query('dateTo').optional({ checkFalsy: true }).matches(DATE_RE),
+  query('person').optional().isString(),
   ...FILTERABLE.map((k) => query(k).optional().isString().withMessage(`${k} 筛选值非法`)),
 ]
 

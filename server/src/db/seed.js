@@ -7,45 +7,59 @@ import { pool } from './pool.js'
 
 // ---------- 角色 ----------
 const ROLES = [
-  { code: 'R01', name: '管理员', desc: '系统最高权限', color: '#ef4444', external: false },
-  { code: 'R02', name: '项目经理', desc: '项目与交付统筹', color: '#a371f7', external: false },
-  { code: 'R03', name: '交付顾问', desc: '内部实施与验证', color: '#4c9aff', external: false },
-  { code: 'R04', name: '开发人员', desc: '问题修复与方案', color: '#d29922', external: false },
-  { code: 'R05', name: '客户测试人员', desc: '外部 · 提单与复测', color: '#22c55e', external: true },
+  { code: 'R01', name: '管理员', desc: '系统最高权限', color: '#ef4444', external: false, preset: true },
+  { code: 'R02', name: '项目经理', desc: '项目与交付统筹', color: '#a371f7', external: false, preset: true },
+  { code: 'R03', name: '交付顾问', desc: '内部实施与验证', color: '#4c9aff', external: false, preset: true },
+  { code: 'R04', name: '开发人员', desc: '问题修复与方案', color: '#d29922', external: false, preset: true },
+  { code: 'R05', name: '客户测试人员', desc: '外部 · 提单与复测', color: '#22c55e', external: true, preset: true },
 ]
 
-// ---------- 权限（20 项），allow=默认授权角色名 ----------
+// ---------- 权限（32 项），allow=默认授权角色名 ----------
 const PERMS = [
   { code: 'DASH_VIEW', module: '工作台', name: '查看首页看板', desc: '核心信息/预警/通知/待办', allow: ['管理员', '项目经理', '交付顾问', '开发人员', '客户测试人员'] },
   { code: 'DASH_NOTICE', module: '工作台', name: '管理通知消息', desc: '通知新增/改/删', allow: ['管理员', '项目经理'] },
   { code: 'DASH_TODO', module: '工作台', name: '管理待办事项', desc: '待办增删改与完成', allow: ['管理员', '项目经理', '交付顾问', '开发人员', '客户测试人员'] },
-  { code: 'DASH_ALERT', module: '工作台', name: '配置预警规则', desc: '规则开关与阈值', allow: ['管理员', '项目经理'] },
+  { code: 'DASH_ALERT', module: '工作台', name: '配置预警规则', desc: '规则开关与阈值', allow: ['管理员', '项目经理'], no_assign: true },
   { code: 'ISSUE_VIEW', module: '问题管理', name: '查看问题列表', desc: '只读查看', allow: ['管理员', '项目经理', '交付顾问', '开发人员', '客户测试人员'] },
   { code: 'ISSUE_CREATE', module: '问题管理', name: '登记新问题', desc: '创建问题', allow: ['管理员', '项目经理', '交付顾问', '客户测试人员'] },
   { code: 'ISSUE_EDIT', module: '问题管理', name: '编辑全部字段', desc: '修改任意问题', allow: ['管理员', '项目经理', '交付顾问'] },
   { code: 'ISSUE_ASSIGN', module: '问题管理', name: '分派负责人', desc: '指派处理人', allow: ['管理员', '项目经理', '交付顾问'] },
-  { code: 'ISSUE_SOLUTION', module: '问题管理', name: '填写开发方案', desc: '修复方案与跟踪', allow: ['管理员', '开发人员'] },
+  { code: 'ISSUE_SOLUTION', module: '问题管理', name: '填写开发方案', desc: '修复方案与跟踪', allow: ['管理员', '项目经理', '开发人员'] },
   { code: 'ISSUE_VERIFY', module: '问题管理', name: '顾问验证', desc: '标记待测试', allow: ['管理员', '项目经理', '交付顾问'] },
-  { code: 'ISSUE_RETEST', module: '问题管理', name: '客户复测', desc: '客户验证并反馈', allow: ['管理员', '客户测试人员'] },
-  { code: 'ISSUE_CLOSE', module: '问题管理', name: '关闭 / reopen', desc: '终态与重开', allow: ['管理员', '交付顾问', '客户测试人员'] },
-  { code: 'ISSUE_DELETE', module: '问题管理', name: '删除问题', desc: '整行删除', allow: ['管理员'] },
+  { code: 'ISSUE_RETEST', module: '问题管理', name: '客户复测', desc: '客户验证并反馈', allow: ['管理员', '项目经理', '客户测试人员'] },
+  { code: 'ISSUE_CLOSE', module: '问题管理', name: '关闭 / reopen', desc: '终态与重开', allow: ['管理员', '项目经理', '交付顾问', '客户测试人员'] },
+  { code: 'ISSUE_DELETE', module: '问题管理', name: '删除问题', desc: '整行删除', allow: ['管理员', '项目经理'] },
   { code: 'ISSUE_BATCH', module: '问题管理', name: '批量行内修改', desc: '勾选多行后在表内直接编辑', allow: ['管理员', '项目经理', '交付顾问'] },
   { code: 'ISSUE_IMPORT', module: '问题管理', name: '导入 Excel', desc: '导入并替换问题列表', allow: ['管理员', '项目经理'] },
   { code: 'ISSUE_LOG', module: '问题管理', name: '查看修改日志', desc: '列表独立列 / 详情卡片 / 工具栏全局查询，字段级留痕', allow: ['管理员', '项目经理', '交付顾问', '开发人员'] },
-  { code: 'ARCHIVE_MGR', module: '系统设置', name: '维护基础档案', desc: '字典/字段/工作台配置增删改', allow: ['管理员', '项目经理'] },
-  { code: 'SECURITY_MGR', module: '系统设置', name: '用户与权限', desc: '账号与授权', allow: ['管理员'] },
+  // 基础档案：按界面二级菜单（页签）细化
+  { code: 'ARCHIVE_TAB_PROJECTS', module: '基础档案', name: '二级菜单·项目', desc: '基础档案-项目页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_PRODUCTS', module: '基础档案', name: '二级菜单·产品', desc: '基础档案-产品页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_PERSONNEL', module: '基础档案', name: '二级菜单·人员', desc: '基础档案-人员页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_DICT', module: '基础档案', name: '二级菜单·字典', desc: '基础档案-字典页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_CUSTOM_FIELDS', module: '基础档案', name: '二级菜单·自定义字段', desc: '基础档案-自定义字段页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_NOTICE_TYPES', module: '基础档案', name: '二级菜单·通知类型', desc: '基础档案-通知类型页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_TODO_PRIOS', module: '基础档案', name: '二级菜单·待办优先级', desc: '基础档案-待办优先级页签', allow: ['管理员', '项目经理'] },
+  { code: 'ARCHIVE_TAB_REQUIRED_FIELDS', module: '基础档案', name: '二级菜单·必填字段', desc: '基础档案-必填字段页签', allow: ['管理员', '项目经理'] },
+  // 用户与权限：按界面二级菜单（页签）细化
+  { code: 'SECURITY_TAB_USERS', module: '用户与权限', name: '二级菜单·用户管理', desc: '用户与权限-用户管理页签', allow: ['管理员', '项目经理'] },
+  { code: 'SECURITY_TAB_ROLES', module: '用户与权限', name: '二级菜单·角色', desc: '用户与权限-角色页签', allow: ['管理员', '项目经理'] },
+  { code: 'SECURITY_TAB_PERMISSIONS', module: '用户与权限', name: '二级菜单·权限位', desc: '用户与权限-权限位页签', allow: ['管理员', '项目经理'], no_assign: true },
+  { code: 'SECURITY_TAB_MATRIX', module: '用户与权限', name: '二级菜单·角色权限', desc: '用户与权限-角色权限页签', allow: ['管理员', '项目经理'] },
+  { code: 'SECURITY_TAB_ALERTS', module: '用户与权限', name: '二级菜单·预警规则', desc: '用户与权限-预警规则页签', allow: ['管理员', '项目经理'], no_assign: true },
+  { code: 'SECURITY_TAB_SETTINGS', module: '用户与权限', name: '二级菜单·系统设置', desc: '用户与权限-系统设置页签', allow: ['管理员'], no_assign: true },
   { code: 'DATA_EXPORT', module: '数据统计', name: '导出数据', desc: '问题列表与统计报表导出 Excel', allow: ['管理员', '项目经理', '交付顾问'] },
   { code: 'PROJECT_ALL', module: '数据统计', name: '查看全部项目', desc: '跨项目汇总', allow: ['管理员', '项目经理'] },
 ]
 
 // ---------- 用户（密码明文仅用于哈希计算，不落库） ----------
 const USERS = [
-  { username: 'admin', password: 'Admin@2026', person: '刘星宇', role: '管理员', status: '启用', projects: 'ALL' },
-  { username: 'pm.zhang', password: 'Pm@123456', person: '张晓林', role: '项目经理', status: '启用', projects: 'DMS-2026,CTC-2026' },
-  { username: 'liu.xingyu', password: 'Liu@2026', person: '刘星宇', role: '交付顾问', status: '启用', projects: 'CTC-2026' },
-  { username: 'chen.yongk', password: 'Chen@2026', person: '陈永侃', role: '交付顾问', status: '启用', projects: 'DMS-2026' },
-  { username: 'chen.chao', password: 'Dev@2026', person: '陈超', role: '开发人员', status: '启用', projects: 'DMS-2026' },
-  { username: 'yang.zhih', password: 'Dev@8888', person: '杨志豪', role: '开发人员', status: '停用', projects: 'DMS-2026' },
+  { username: 'admin', password: 'Admin@2026', person: '系统管理员', role: '管理员', status: '启用', projects: 'ALL', preset: true },
+  { username: 'pm.zhang', password: 'Pm@123456', person: '张晓林', personnelCode: 'P003', role: '项目经理', status: '启用', projects: 'DMS-2026,CTC-2026' },
+  { username: 'liu.xingyu', password: 'Liu@2026', person: '刘星宇', personnelCode: 'P001', role: '交付顾问', status: '启用', projects: 'CTC-2026' },
+  { username: 'chen.yongk', password: 'Chen@2026', person: '陈永侃', personnelCode: 'P002', role: '交付顾问', status: '启用', projects: 'DMS-2026' },
+  { username: 'chen.chao', password: 'Dev@2026', person: '陈超', personnelCode: 'P004', role: '开发人员', status: '启用', projects: 'DMS-2026' },
+  { username: 'yang.zhih', password: 'Dev@8888', person: '杨志豪', personnelCode: 'P005', role: '开发人员', status: '停用', projects: 'DMS-2026' },
   { username: 'wenqian', password: 'Test@2026', person: 'wenqian', role: '客户测试人员', status: '启用', projects: 'DMS-2026' },
   { username: 'adele', password: 'Test@2026', person: 'Adele', role: '客户测试人员', status: '启用', projects: 'DMS-2026' },
   { username: 'sally', password: 'Test@2026', person: 'sally', role: '客户测试人员', status: '启用', projects: 'DMS-2026' },
@@ -172,27 +186,31 @@ export async function seed() {
     for (const r of ROLES) {
       await client.query(
         `INSERT INTO roles(code, name, "desc", external, color, preset, projects)
-         VALUES ($1,$2,$3,$4,$5,false,ARRAY['ALL']::text[])
+         VALUES ($1,$2,$3,$4,$5,COALESCE($6,false),ARRAY['ALL']::text[])
          ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, "desc"=EXCLUDED."desc", external=EXCLUDED.external,
            color=EXCLUDED.color, preset=EXCLUDED.preset, projects=EXCLUDED.projects`,
-        [r.code, r.name, r.desc, r.external, r.color],
+        [r.code, r.name, r.desc, r.external, r.color, r.preset],
       )
     }
 
     // 权限（20 项）
     for (const p of PERMS) {
       await client.query(
-        `INSERT INTO permissions(code, module, name, "desc", allow, preset) VALUES ($1,$2,$3,$4,$5,false)
+        `INSERT INTO permissions(code, module, name, "desc", allow, no_assign) VALUES ($1,$2,$3,$4,$5,COALESCE($6,false))
          ON CONFLICT (code) DO UPDATE SET module=EXCLUDED.module, name=EXCLUDED.name, "desc"=EXCLUDED."desc",
-           allow=EXCLUDED.allow, preset=EXCLUDED.preset`,
-        [p.code, p.module, p.name, p.desc, JSON.stringify(p.allow)],
+           allow=EXCLUDED.allow, no_assign=EXCLUDED.no_assign`,
+        [p.code, p.module, p.name, p.desc, JSON.stringify(p.allow), p.no_assign],
       )
     }
 
-    // 角色×权限矩阵（按 allow 展开，幂等重建）
+    // 角色×权限矩阵（按 allow 展开，幂等重建）。
+    // 禁止分配的权限不授予非管理员角色；管理员角色始终拥有全部权限，不受影响。
     await client.query('DELETE FROM role_permissions')
+    const { rows: noAssignRows } = await client.query('SELECT code FROM permissions WHERE no_assign=true')
+    const noAssign = new Set(noAssignRows.map((r) => r.code))
     for (const p of PERMS) {
       for (const roleName of p.allow) {
+        if (noAssign.has(p.code) && roleName !== '管理员') continue
         await client.query(
           'INSERT INTO role_permissions(role_code, perm_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',
           [roleCode[roleName], p.code],
@@ -232,7 +250,7 @@ export async function seed() {
           `INSERT INTO dict_items(dict_key, value, label, color, note, product_code, sort, preset)
            VALUES ($1,$2,$3,$4,$5,$6,$7,false)
            ON CONFLICT (dict_key, value) DO UPDATE SET label=EXCLUDED.label, color=EXCLUDED.color,
-             note=EXCLUDED.note, product_code=EXCLUDED.product_code, sort=EXCLUDED.sort, preset=EXCLUDED.preset`,
+             note=EXCLUDED.note, product_code=EXCLUDED.product_code, sort=EXCLUDED.sort`,
           [dictKey, it.v, it.v, it.color, it.note ?? null, it.product ?? null, i],
         )
       }
@@ -243,11 +261,13 @@ export async function seed() {
       const hash = bcrypt.hashSync(u.password, 10)
       const projects = u.projects === 'ALL' ? ['ALL'] : u.projects.split(',')
       await client.query(
-        `INSERT INTO users(username, password_hash, person, role_code, status, projects, preset)
-         VALUES ($1,$2,$3,$4,$5,$6,false)
+        `INSERT INTO users(username, password_hash, person, personnel_code, role_code, status, projects, preset)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
          ON CONFLICT (username) DO UPDATE SET password_hash=EXCLUDED.password_hash, person=EXCLUDED.person,
-           role_code=EXCLUDED.role_code, status=EXCLUDED.status, projects=EXCLUDED.projects, preset=EXCLUDED.preset`,
-        [u.username, hash, u.person, roleCode[u.role], u.status, JSON.stringify(projects)],
+           personnel_code=EXCLUDED.personnel_code, role_code=EXCLUDED.role_code, status=EXCLUDED.status,
+           projects=EXCLUDED.projects, preset=EXCLUDED.preset`,
+        [u.username, hash, u.person, u.personnelCode ?? null, roleCode[u.role], u.status,
+          JSON.stringify(projects), u.preset ?? false],
       )
     }
 
@@ -306,7 +326,7 @@ export async function seed() {
     )
 
     await client.query('COMMIT')
-    console.log('[seed] 完成：5 角色 / 20 权限 / 9 用户 / 2 项目 / 3 产品 / 8 人员 / 9 类字典 / 3 通知 / 3 待办 / 3 预警规则')
+    console.log(`[seed] 完成：5 角色 / ${PERMS.length} 权限 / 9 用户 / 2 项目 / 3 产品 / 8 人员 / 9 类字典 / 3 通知 / 3 待办 / 3 预警规则`)
   } catch (err) {
     await client.query('ROLLBACK')
     throw err

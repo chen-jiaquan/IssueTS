@@ -69,7 +69,7 @@ const FILTER_KEYS = [
 const blankFilters = () => Object.fromEntries(FILTER_KEYS.map((k) => [k, []]))
 const query = reactive({ page: 1, pageSize: 50, q: '', ...blankFilters() })
 // 下钻提示（值已并入 query，extra 仅用于展示提示条）
-const extra = reactive({ developer: '', module: '', type: '', overdue: '', drill: '' })
+const extra = reactive({ developer: '', module: '', type: '', overdue: '', drill: '', person: '' })
 const selected = ref([])
 // 表格锁定：'' 不锁定 / 'header' 仅锁定表头 / 'both' 表头+左右列都锁定（偏好存本地）
 const lockMode = ref(localStorage.getItem('issue_lock_mode') ?? '')
@@ -136,6 +136,7 @@ const filterParams = () => {
   if (query.dateFrom) p.dateFrom = query.dateFrom
   if (query.dateTo) p.dateTo = query.dateTo
   if (extra.overdue) p.overdue = '1'
+  if (extra.person) p.person = extra.person
   return p
 }
 // 表头筛选候选值（全量数据去重，跨页可选）
@@ -173,7 +174,7 @@ function applyPageSize() {
 function search() { query.page = 1; load() }
 function reset() {
   Object.assign(query, { page: 1, q: '', timeField: '', dateFrom: '', dateTo: '', ...blankFilters() })
-  Object.assign(extra, { developer: '', module: '', type: '', overdue: '', drill: '' })
+  Object.assign(extra, { developer: '', module: '', type: '', overdue: '', drill: '', person: '' })
   load()
 }
 
@@ -686,7 +687,7 @@ onMounted(async () => {
   // 统计/工作台下钻参数
   const qs = route.query
   if (qs.q) query.q = String(qs.q)
-  for (const k of ['project', 'status', 'priority', 'owner', 'stage', 'plan_end', 'resolved_at']) {
+  for (const k of ['project', 'status', 'priority', 'owner', 'reporter', 'stage', 'plan_end', 'resolved_at']) {
     if (qs[k]) query[k] = String(qs[k]).split(',')
   }
   for (const k of ['developer', 'module', 'type']) {
@@ -703,6 +704,7 @@ onMounted(async () => {
     extra.drill = `${qs.timeField === 'resolvedAt' ? '实际完成' : '预计完成'} ${qs.dateFrom || ''} ~ ${qs.dateTo || ''}`
   }
   if (qs.overdue) extra.overdue = '1'
+  if (qs.person) extra.person = String(qs.person)
 
   await load()
   bindColumnDrag()
@@ -742,10 +744,10 @@ onMounted(async () => {
     </div>
 
     <!-- 下钻筛选提示 -->
-    <el-alert v-if="extra.overdue || extra.developer || extra.module || extra.type || extra.drill" type="info" :closable="false"
+    <el-alert v-if="extra.overdue || extra.developer || extra.module || extra.type || extra.drill || extra.person" type="info" :closable="false"
       style="margin-bottom:10px; padding:4px 12px">
       <span style="font-size:12px">
-        下钻筛选：{{ extra.overdue ? '逾期未关闭' : '' }}{{ extra.developer ? ` 开发人员=${extra.developer}` : '' }}{{ extra.module ? ` 模块=${extra.module}` : '' }}{{ extra.type ? ` 类型=${extra.type}` : '' }}{{ extra.drill ? ` 统计穿透（${extra.drill}）` : '' }}
+        下钻筛选：{{ extra.overdue ? '逾期未关闭' : '' }}{{ extra.person ? ` 本人负责/开发/提交=${extra.person}` : '' }}{{ extra.developer ? ` 开发人员=${extra.developer}` : '' }}{{ extra.module ? ` 模块=${extra.module}` : '' }}{{ extra.type ? ` 类型=${extra.type}` : '' }}{{ extra.drill ? ` 统计穿透（${extra.drill}）` : '' }}
         <el-button link type="primary" size="small" @click="reset">清除</el-button>
       </span>
     </el-alert>

@@ -43,8 +43,9 @@ const TABLE_MAX_HEIGHT = 'calc(100vh - 180px)'
 function setLockMode(val) { localStorage.setItem('stats_lock_mode', val ?? '') }
 
 const curDim = computed(() => DIMS.find((d) => d.key === q.dim))
+const personFieldLabel = { owner: '负责人', developer: '开发人员', reporter: '提交人' }
 const dimLabel = computed(() => (q.dim === 'owner'
-  ? (q.personField === 'developer' ? '开发人员' : '负责人')
+  ? (personFieldLabel[q.personField] ?? '负责人')
   : curDim.value?.label ?? ''))
 
 const params = () => {
@@ -287,6 +288,7 @@ onMounted(async () => {
       <el-select v-if="q.dim === 'owner'" v-model="q.personField" style="width: 105px" @change="load">
         <el-option value="owner" label="按负责人" />
         <el-option value="developer" label="按开发人员" />
+        <el-option value="reporter" label="按提交人" />
       </el-select>
       <el-radio-group v-model="q.granularity" @change="load">
         <el-radio-button v-for="g in GRANS" :key="g.key" :value="g.key">{{ g.label }}</el-radio-button>

@@ -6,7 +6,7 @@ const csvValues = (v) => (Array.isArray(v) ? v : String(v ?? '').split(','))
   .map((s) => String(s).trim()).filter(Boolean)
 
 // 首页统计的公共过滤：可见项目范围 + 所选项目 + 本人负责/开发/提交的问题
-// scope=null 表示全项目角色（管理员/项目经理），保留全量口径
+// 全项目角色（管理员/项目经理，含显式配置全部项目的情况）保留全量口径
 function buildWhere(scope, filters = {}, alias = 'i', profile = null) {
   const clauses = []
   const params = []
@@ -19,7 +19,7 @@ function buildWhere(scope, filters = {}, alias = 'i', profile = null) {
     params.push(projects)
     clauses.push(`${alias}.project = ANY($${params.length})`)
   }
-  const personActive = !!profile?.person && scope !== null
+  const personActive = !!profile?.person && scope !== null && !profile.perms.includes('PROJECT_ALL')
   if (personActive) {
     const idx = params.push(profile.person)
     clauses.push(`(${alias}.owner = $${idx} OR ${alias}.developer = $${idx} OR ${alias}.reporter = $${idx})`)

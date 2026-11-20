@@ -61,18 +61,19 @@ router.get('/', asyncHandler(async (_req, res) => ok(res, { themes: THEME_OPTION
 router.get('/theme-options', asyncHandler(async (_req, res) => ok(res, THEME_OPTIONS)))
 router.get('/stat-dims', asyncHandler(async (_req, res) => ok(res, STAT_DIMS)))
 
-// 系统设置（SECURITY_MGR）：问题导出上限，0=不限制
-router.get('/settings/issue-export-limit', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+// 系统设置：问题导出上限，0=不限制（按二级菜单权限）
+const SETTINGS_PERMS = ['SECURITY_TAB_SETTINGS']
+router.get('/settings/issue-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   asyncHandler(async (req, res) => ok(res, await getIssueExportLimit(req.query.project))))
-router.put('/settings/issue-export-limit', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+router.put('/settings/issue-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   issueExportLimitRules, validate,
   asyncHandler(async (req, res) => ok(res,
     await setIssueExportLimit(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
 
-// 系统设置（SECURITY_MGR）：人员下推用户时的初始密码
-router.get('/settings/default-user-password', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+// 系统设置：人员下推用户时的初始密码
+router.get('/settings/default-user-password', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   asyncHandler(async (req, res) => ok(res, await getDefaultUserPassword(req.query.project))))
-router.put('/settings/default-user-password', loadProfile, attachScope, hasPerm('SECURITY_MGR'),
+router.put('/settings/default-user-password', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   defaultUserPasswordRules, validate,
   asyncHandler(async (req, res) => ok(res,
     await setDefaultUserPassword(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
@@ -134,10 +135,10 @@ router.get('/feature-doc', loadProfile, asyncHandler(async (_req, res) => {
       { key: 'home', label: '首页', perm: 'DASH_VIEW' },
       { key: 'issues', label: '问题跟踪', perm: 'ISSUE_VIEW' },
       { key: 'stats', label: '统计报表', perm: 'ISSUE_VIEW' },
-      { key: 'archives', label: '基础档案设置', perm: 'ARCHIVE_MGR' },
-      { key: 'security', label: '用户与权限', perm: 'SECURITY_MGR' },
+      { key: 'archives', label: '基础档案设置', perm: 'ARCHIVE_TAB_PROJECTS' },
+      { key: 'security', label: '用户与权限', perm: 'SECURITY_TAB_USERS' },
     ],
-    permsModule: '见 permissions 表（20 项权限位）',
+    permsModule: '见 permissions 表（32 项权限位）',
     counts: counts.rows[0],
   })
 }))

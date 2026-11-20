@@ -5,6 +5,7 @@ import { body, param } from 'express-validator'
 export const DICT_KEYS = ['stage', 'type', 'module', 'priority', 'impact', 'status', 'pending_test', 'customer_test']
 
 const presetRule = body('preset').optional().isBoolean().withMessage('系统预置必须为布尔')
+const noAssignRule = body('no_assign').optional().isBoolean().withMessage('禁止分配必须为布尔')
 
 const usernameRules = (optional) => {
   const r = body('username').isString().trim().notEmpty().withMessage('用户名必填').isLength({ max: 64 })
@@ -45,7 +46,7 @@ export const permRules = (partial = false) => [
   body('name').optional().isString(),
   body('desc').optional({ nullable: true }).isString(),
   body('allow').optional({ nullable: true }).isArray(),
-  presetRule,
+  noAssignRule,
 ]
 
 const enabledRule = body('enabled').optional().isBoolean().withMessage('enabled 必须为布尔')

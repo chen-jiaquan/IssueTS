@@ -1,6 +1,6 @@
 import http from './http'
 
-// 项目 / 产品 / 人员 / 字典 / 角色（写操作需 ARCHIVE_MGR，由后端 RBAC 把关）
+// 项目 / 产品 / 人员 / 字典 / 角色（写操作由后端按二级菜单权限位把关）
 export const listProjects = () => http.get('/archives/projects')
 export const createProject = (d) => http.post('/archives/projects', d)
 export const updateProject = (code, d) => http.put(`/archives/projects/${code}`, d)
@@ -56,7 +56,8 @@ export const deleteCustomField = (key) => http.delete(`/archives/custom-fields/$
 export const getRequiredFields = (project) =>
   http.get('/archives/required-fields', project ? { params: { project } } : {})
 export const getRequiredFieldRules = () => http.get('/archives/required-fields/rules')
-export const putRequiredFields = (fields) => http.put('/archives/required-fields', { fields })
+export const putRequiredFields = (fields, project) =>
+  http.put('/archives/required-fields', { fields }, project ? { params: { project } } : {})
 
 export const listNoticeTypes = () => http.get('/archives/notice-types')
 export const createNoticeType = (d) => http.post('/archives/notice-types', d)

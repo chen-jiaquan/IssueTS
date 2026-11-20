@@ -1,10 +1,11 @@
 <script setup>
 // 基础档案设置：项目/产品/人员/字典/自定义字段/必填/通知类型/待办优先级 编辑
-// 权限：读=登录即可；写=ARCHIVE_MGR；角色/权限位/预警规则已移至「用户与权限」
+// 权限：按界面二级菜单（页签）细化。
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '@/components/BackHome.vue'
 import { useAuthStore } from '@/store/auth'
+import { ARCHIVE_TAB_PERM } from '@/permissionMenus'
 import * as A from '@/api/archives'
 import {
   exportPersonnel, personnelImportFields as fetchPersonnelImportFields,
@@ -13,9 +14,18 @@ import {
 import http from '@/api/http'
 
 const auth = useAuthStore()
-const canWrite = auth.has('ARCHIVE_MGR')
+// 当前登录者是否为系统管理员：仅管理员可在人员岗位中选择管理员角色。
+const currentIsSystemAdmin = computed(() => {
+  const code = auth.user?.role_code
+  const name = auth.user?.role
+  return code === 'R01' || name === '管理员'
+})
+const ARCHIVE_TAB_KEYS = ['projects', 'products', 'personnel', 'dict', 'custom', 'notice-types', 'todo-prios', 'required']
+const canWriteTab = (key) => auth.has(ARCHIVE_TAB_PERM[key])
+const visibleTabKeys = computed(() => ARCHIVE_TAB_KEYS.filter((key) => canWriteTab(key)))
+const canWrite = computed(() => visibleTabKeys.value.length > 0)
 
-const tab = ref('projects')
+const tab = ref(visibleTabKeys.value[0] || 'projects')
 const loading = ref(false)
 
 // ---------- 数据 ----------
@@ -25,9 +35,9 @@ const roles = ref([]) // 角色档案，供人员岗位下拉选择
 const personnel = ref([])
 const dictItems = ref([])
 const dictFilter = ref('')
-const dictProjectFilter = ref('') // 字典项按归属项目过滤：空=全部，选中=通用项+该项目专属项
-const personnelProjectFilter = ref('') // 人员档案按所属项目过滤：空=全部，选中=含 ALL 或该项目的人员
-const archiveProjectFilter = ref('') // 产品/自定义字段/通知类型/待办优先级的项目过滤
+const dictProjectFilter = ref([]) // 字典项按归属项目过滤（多选）：空=全部，选中=通用项+所选项目专属项
+const personnelProjectFilter = ref([]) // 人员档案按所属项目过滤（多选）：空=全部，选中=含 ALL 或任一所选项目的人员
+const archiveProjectFilter = ref([]) // 产品/自定义字段/通知类型/待办优先级的项目过滤（多选）
 const customFields = ref([])
 const requiredFieldRules = ref([]) // [{ field_key, projects }]，projects 空数组=全局必填
 const fieldOptions = ref([]) // 问题字段清单（供必填勾选）
@@ -62,9 +72,11 @@ const fieldRequired = (f, editingRow) => {
 const fieldEmpty = (v) => v === '' || v == null || (Array.isArray(v) && v.length === 0)
 // 按档案 projects 数组过滤（空=不过滤；选中=projects 含该项目或 ALL）
 const filterByArchiveProject = (rows) => {
-  const code = archiveProjectFilter.value
-  if (!code) return rows
-  return rows.filter((r) => Array.isArray(r.projects) && (r.projects.includes(code) || r.projects.includes('ALL')))
+  const selected = archiveProjectFilter.value
+  if (!selected.length) return rows
+  // 所属项目含 ALL（全部项目）或与任一所选项目相交的档案才显示
+  return rows.filter((r) => Array.isArray(r.projects)
+    && (r.projects.includes('ALL') || r.projects.some((c) => selected.includes(c))))
 }
 
 async function loadAll() {
@@ -82,7 +94,7 @@ async function loadAll() {
     ])
     ;[projects.value, products.value, personnel.value, dictItems.value,
       customFields.value, noticeTypes.value, todoPrios.value] = done
-    if (canWrite) roles.value = await A.listRoles()
+    if (canWrite.value) roles.value = await A.listRoles()
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -185,7 +197,10 @@ const cfg = ref(null) // 当前 tab 配置
 const form = reactive({})
 const saving = ref(false)
 
+const isProtectedRow = (key, row) => key === 'dict' && !!row?.preset
+
 function openDialog(tabCfg, row = null) {
+  if (isProtectedRow(tab.value, row)) return ElMessage.warning('系统预置字典项不允许编辑')
   cfg.value = tabCfg
   editing.value = row
   Object.keys(form).forEach((k) => delete form[k])
@@ -198,10 +213,21 @@ function openDialog(tabCfg, row = null) {
 
 async function saveDialog() {
   for (const f of cfg.value.form) {
-    // 项目字段：非系统管理员新增/编辑都必须选；其它必填字段仅新增时校验（保持原行为）
-    const required = PROJECT_FIELD_KEYS.includes(f.key) ? requireArchiveProject() : (f.required && !editing.value)
+    // 项目字段：非系统管理员新增/编辑都必须选；标记 requiredOnEdit 的字段编辑时也必填；其余仅新增校验
+    const required = PROJECT_FIELD_KEYS.includes(f.key)
+      ? requireArchiveProject()
+      : (f.required && (!editing.value || f.requiredOnEdit))
     if (required && fieldEmpty(form[f.key])) {
       return ElMessage.warning(`${f.label} 必填`)
+    }
+  }
+  if (tab.value === 'personnel') {
+    const name = String(form.name ?? '').trim()
+    const duplicate = personnel.value.find((p) =>
+      p.code !== editing.value?.code && String(p.name ?? '').trim().toLowerCase() === name.toLowerCase())
+    if (duplicate) return ElMessage.warning(`姓名「${name}」已存在，不允许重复`)
+    if (!currentIsSystemAdmin.value && (form.role === 'R01' || form.role === '管理员')) {
+      return ElMessage.warning('仅管理员角色可将人员岗位设为管理员')
     }
   }
   const payload = {}
@@ -221,6 +247,7 @@ async function saveDialog() {
 }
 
 async function removeRow(tabCfg, row) {
+  if (isProtectedRow(tab.value, row)) return ElMessage.warning('系统预置字典项不允许删除')
   await ElMessageBox.confirm(`确认删除「${row[tabCfg.nameKey] ?? row[tabCfg.rowKey]}」？删除不可恢复。`, '删除', { type: 'warning' })
   try {
     await tabCfg.api.del(row)
@@ -232,6 +259,7 @@ async function removeRow(tabCfg, row) {
 }
 
 async function toggleArchive(tabCfg, row) {
+  if (isProtectedRow(tab.value, row)) return ElMessage.warning('系统预置字典项不允许修改')
   const next = row.enabled === false
   const name = row[tabCfg.nameKey] ?? row[tabCfg.rowKey]
   try {
@@ -291,10 +319,11 @@ const productCfg = computed(() => ({
 }))
 
 const personnelFiltered = computed(() => {
-  const code = personnelProjectFilter.value
-  if (!code) return personnel.value
-  // 所属项目含 ALL（全部项目）或包含所选项目的人员才显示
-  return personnel.value.filter((p) => Array.isArray(p.projects) && (p.projects.includes('ALL') || p.projects.includes(code)))
+  const selected = personnelProjectFilter.value
+  if (!selected.length) return personnel.value
+  // 所属项目含 ALL 或与任一所选项目相交的人员才显示
+  return personnel.value.filter((p) => Array.isArray(p.projects)
+    && (p.projects.includes('ALL') || p.projects.some((c) => selected.includes(c))))
 })
 const personnelCfg = computed(() => ({
   rowKey: 'code', nameKey: 'name',
@@ -309,10 +338,17 @@ const personnelCfg = computed(() => ({
   form: [
     { key: 'code', label: '编码', required: true, disabledOnEdit: true },
     { key: 'name', label: '姓名', required: true },
-    { key: 'role', label: '岗位', type: 'select',
+    { key: 'role', label: '岗位', type: 'select', required: true, requiredOnEdit: true,
       options: () => {
-        const opts = roles.value.map((r) => ({ key: r.code, label: r.name }))
-        if (form.role && !opts.some((o) => o.key === form.role)) opts.unshift({ key: form.role, label: roleLabel(form.role) })
+        // 非管理员登录时，岗位下拉不提供管理员角色。
+        const selectable = currentIsSystemAdmin.value
+          ? roles.value
+          : roles.value.filter((r) => r.code !== 'R01' && r.name !== '管理员')
+        const opts = selectable.map((r) => ({ key: r.code, label: r.name }))
+        const isAdminRole = form.role === 'R01' || form.role === '管理员'
+        if (form.role && !isAdminRole && !opts.some((o) => o.key === form.role)) {
+          opts.unshift({ key: form.role, label: roleLabel(form.role) })
+        }
         return opts
       } },
     { key: 'group', label: '所属组' },
@@ -324,8 +360,8 @@ const personnelCfg = computed(() => ({
 
 const dictFiltered = computed(() => dictItems.value.filter((d) => {
   if (dictFilter.value && d.dict_key !== dictFilter.value) return false
-  // 项目过滤：归属为空（通用）始终显示；专属项仅在选中其归属项目时显示
-  if (dictProjectFilter.value && d.project_code && d.project_code !== dictProjectFilter.value) return false
+  // 项目过滤（多选）：归属为空（通用）始终显示；专属项仅在选中其归属项目时显示
+  if (dictProjectFilter.value.length && d.project_code && !dictProjectFilter.value.includes(d.project_code)) return false
   return true
 }))
 const dictCfg = computed(() => ({
@@ -403,27 +439,74 @@ const CFGS = computed(() => ({
   dict: dictCfg.value, custom: customCfg.value, 'notice-types': noticeTypeCfg.value,
   'todo-prios': todoPrioCfg.value,
 }))
+const visibleCFGS = computed(() => Object.fromEntries(
+  visibleTabKeys.value.filter((key) => CFGS.value[key]).map((key) => [key, CFGS.value[key]]),
+))
 
-// ---------- 必填字段（支持按项目区分） ----------
+// ---------- 必填字段（按项目过滤配置） ----------
 const reqDirty = ref(false)
+const requiredProjectFilter = ref('')
 const ruleOf = (key) => requiredFieldRules.value.find((r) => r.field_key === key)
-const isRequired = (key) => !!ruleOf(key)
-const requiredProjects = (key) => ruleOf(key)?.projects || []
+const isGlobalRuleObj = (r) => !!r && ((r.projects || []).length === 0 || r.projects.includes('ALL'))
+const isGlobalRule = (key) => isGlobalRuleObj(ruleOf(key))
+// 全局视图只看全局规则；项目视图含继承的全局规则（只读）
+const isRequiredForFilter = (key) => {
+  const project = requiredProjectFilter.value
+  if (!project) return isGlobalRule(key)
+  if (isGlobalRule(key)) return true
+  return (ruleOf(key)?.projects || []).includes(project)
+}
+const requiredRuleReadOnly = (key) => {
+  if (!canWriteTab('required')) return true
+  if (requiredProjectFilter.value) return isGlobalRule(key)
+  return auth.scope !== null
+}
+const requiredReadOnlyTip = (key) => {
+  if (!canWriteTab('required')) return '当前账号为只读'
+  if (requiredProjectFilter.value && isGlobalRule(key)) return '全局必填字段在所有项目生效，请到全局配置中修改'
+  if (!requiredProjectFilter.value && auth.scope !== null) return '全局必填字段仅系统管理员可修改'
+  return ''
+}
+const canSaveRequired = () => canWriteTab('required') && (!!requiredProjectFilter.value || auth.scope === null)
+async function onRequiredFilterChange() {
+  try {
+    requiredFieldRules.value = await A.getRequiredFieldRules()
+    reqDirty.value = false
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
 function toggleRequired(key, checked) {
-  if (checked) {
+  if (requiredRuleReadOnly(key)) return
+  const project = requiredProjectFilter.value
+  if (project) {
+    let rule = ruleOf(key)
+    if (checked) {
+      if (!rule) requiredFieldRules.value.push({ field_key: key, projects: [project] })
+      else if (!rule.projects.includes(project)) rule.projects.push(project)
+    } else {
+      if (!rule || isGlobalRuleObj(rule)) return
+      rule.projects = rule.projects.filter((p) => p !== project)
+      if (!rule.projects.length) requiredFieldRules.value = requiredFieldRules.value.filter((r) => r.field_key !== key)
+    }
+  } else if (checked) {
     if (!ruleOf(key)) requiredFieldRules.value.push({ field_key: key, projects: [] })
   } else {
     requiredFieldRules.value = requiredFieldRules.value.filter((r) => r.field_key !== key)
   }
   reqDirty.value = true
 }
-function setRequiredProjects(key, projects) {
-  const rule = ruleOf(key)
-  if (rule) { rule.projects = projects || []; reqDirty.value = true }
-}
 async function saveRequired() {
   try {
-    await A.putRequiredFields(requiredFieldRules.value)
+    const project = requiredProjectFilter.value
+    if (project) {
+      const payload = requiredFieldRules.value
+        .filter((r) => (r.projects || []).includes(project) && !isGlobalRuleObj(r))
+        .map((r) => ({ field_key: r.field_key, projects: [project] }))
+      await A.putRequiredFields(payload, project)
+    } else {
+      await A.putRequiredFields(requiredFieldRules.value.filter((r) => isGlobalRuleObj(r)))
+    }
     ElMessage.success('必填字段配置已保存')
     reqDirty.value = false
   } catch (e) {
@@ -455,7 +538,9 @@ const groupedFieldOptions = computed(() => {
   }
   return [...groups, custom, other].filter((g) => g.fields.length)
 })
-const requiredCountIn = (group) => group.fields.filter((f) => isRequired(f.key)).length
+const requiredCountIn = (group) => group.fields.filter((f) => isRequiredForFilter(f.key)).length
+const requiredCountTotal = computed(() =>
+  groupedFieldOptions.value.reduce((n, g) => n + requiredCountIn(g), 0))
 </script>
 
 <template>
@@ -469,23 +554,23 @@ const requiredCountIn = (group) => group.fields.filter((f) => isRequired(f.key))
 
     <el-tabs v-model="tab" v-loading="loading" style="margin-top:10px">
       <!-- 通用表格型档案 -->
-      <el-tab-pane v-for="(c, key) in CFGS" :key="key" :label="{ projects: '项目', products: '产品', personnel: '人员', dict: '字典', custom: '自定义字段', 'notice-types': '通知类型', 'todo-prios': '待办优先级' }[key]" :name="key">
+      <el-tab-pane v-for="(c, key) in visibleCFGS" :key="key" :label="{ projects: '项目', products: '产品', personnel: '人员', dict: '字典', custom: '自定义字段', 'notice-types': '通知类型', 'todo-prios': '待办优先级' }[key]" :name="key">
         <div class="toolbar">
           <el-select v-if="key === 'dict'" v-model="dictFilter" clearable placeholder="按字典类型过滤" style="width:180px">
             <el-option v-for="d in DICT_KEYS" :key="d.key" :value="d.key" :label="d.label" />
           </el-select>
-          <el-select v-if="key === 'dict'" v-model="dictProjectFilter" clearable placeholder="按归属项目过滤" style="width:180px">
+          <el-select v-if="key === 'dict'" v-model="dictProjectFilter" multiple collapse-tags clearable placeholder="按归属项目过滤" style="width:220px">
             <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
           </el-select>
           <el-select v-if="['products', 'custom', 'notice-types', 'todo-prios'].includes(key)"
-            v-model="archiveProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px">
+            v-model="archiveProjectFilter" multiple collapse-tags clearable placeholder="按所属项目过滤" style="width:220px">
             <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
           </el-select>
-          <el-button v-if="canWrite" type="primary" size="small" @click="openDialog(c)">新增</el-button>
-          <el-select v-if="key === 'personnel'" v-model="personnelProjectFilter" clearable placeholder="按所属项目过滤" style="width:180px">
+          <el-button v-if="canWriteTab(key)" type="primary" size="small" @click="openDialog(c)">新增</el-button>
+          <el-select v-if="key === 'personnel'" v-model="personnelProjectFilter" multiple collapse-tags clearable placeholder="按所属项目过滤" style="width:220px">
             <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
           </el-select>
-          <template v-if="key === 'personnel' && canWrite">
+          <template v-if="key === 'personnel' && canWriteTab(key)">
             <el-button size="small" :loading="exportBusy" @click="doPersonnelExport">导出 Excel</el-button>
             <el-button size="small" @click="openPersonnelImport">导入 Excel</el-button>
           </template>
@@ -501,23 +586,33 @@ const requiredCountIn = (group) => group.fields.filter((f) => isRequired(f.key))
               <span v-else>{{ row[col.key] ?? '' }}</span>
             </template>
           </el-table-column>
-          <el-table-column v-if="canWrite" label="操作" width="190" fixed="right">
+          <el-table-column v-if="canWriteTab(key)" label="操作" width="190" fixed="right">
             <template #default="{ row }">
-              <el-button link size="small" type="primary" @click="openDialog(c, row)">编辑</el-button>
-              <el-button link size="small" :type="row.enabled === false ? 'success' : 'warning'"
+              <el-button link size="small" type="primary" :disabled="isProtectedRow(key, row)"
+                :title="isProtectedRow(key, row) ? '系统预置字典项不允许编辑' : ''" @click="openDialog(c, row)">编辑</el-button>
+              <el-button link size="small" :type="row.enabled === false ? 'success' : 'warning'" :disabled="isProtectedRow(key, row)"
+                :title="isProtectedRow(key, row) ? '系统预置字典项不允许修改' : ''"
                 @click="toggleArchive(c, row)">{{ row.enabled === false ? '启用' : '禁用' }}</el-button>
-              <el-button link size="small" type="danger" @click="removeRow(c, row)">删除</el-button>
+              <el-button link size="small" type="danger" :disabled="isProtectedRow(key, row)"
+                :title="isProtectedRow(key, row) ? '系统预置字典项不允许删除' : ''" @click="removeRow(c, row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
       </el-tab-pane>
 
       <!-- 必填字段 -->
-      <el-tab-pane label="必填字段" name="required">
+      <el-tab-pane v-if="visibleTabKeys.includes('required')" label="必填字段" name="required">
         <div class="toolbar">
-          <span class="tip">按字段类型分组；勾选即必填，可选项目范围（不选=所有项目必填）</span>
-          <el-tag size="small" type="info" effect="plain">已选 {{ requiredFieldRules.length }} / {{ fieldOptions.length }}</el-tag>
-          <el-button v-if="canWrite" type="primary" size="small" :disabled="!reqDirty" @click="saveRequired">保存配置</el-button>
+          <el-select v-model="requiredProjectFilter" clearable placeholder="全局配置（所有项目）" style="width:220px"
+            @change="onRequiredFilterChange">
+            <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
+          </el-select>
+          <span class="tip">{{ requiredProjectFilter
+            ? '当前仅配置所选项目的必填字段；标记“全局”的字段由全局配置继承'
+            : '全局配置：勾选后对所有项目生效；切换项目可单独配置' }}</span>
+          <el-tag size="small" type="info" effect="plain">已选 {{ requiredCountTotal }} / {{ fieldOptions.length }}</el-tag>
+          <el-button v-if="canWriteTab('required')" type="primary" size="small"
+            :disabled="!reqDirty || !canSaveRequired()" @click="saveRequired">保存配置</el-button>
         </div>
         <div class="req-groups">
           <section v-for="g in groupedFieldOptions" :key="g.label" class="req-group" :style="{ '--grp': g.color }">
@@ -529,16 +624,12 @@ const requiredCountIn = (group) => group.fields.filter((f) => isRequired(f.key))
             </header>
             <div class="req-group-body">
               <div v-for="f in g.fields" :key="f.key" class="req-field-row">
-                <el-checkbox :model-value="isRequired(f.key)" :disabled="!canWrite"
-                  @change="(v) => toggleRequired(f.key, v)">
+                <el-checkbox :model-value="isRequiredForFilter(f.key)" :disabled="requiredRuleReadOnly(f.key)"
+                  :title="requiredReadOnlyTip(f.key)" @change="(v) => toggleRequired(f.key, v)">
                   <span class="req-field-label">{{ f.label }}</span>
                   <span class="req-field-key">{{ f.key }}</span>
+                  <el-tag v-if="requiredProjectFilter && isGlobalRule(f.key)" size="small" type="info" effect="plain">全局</el-tag>
                 </el-checkbox>
-                <el-select v-if="isRequired(f.key)" class="req-field-projects" multiple collapse-tags clearable
-                  :model-value="requiredProjects(f.key)" :disabled="!canWrite"
-                  placeholder="所有项目（全局必填）" @update:model-value="(v) => setRequiredProjects(f.key, v)">
-                  <el-option v-for="p in visibleProjects()" :key="p.code" :value="p.code" :label="`${p.code} ${p.name}`" />
-                </el-select>
               </div>
             </div>
           </section>
@@ -551,7 +642,7 @@ const requiredCountIn = (group) => group.fields.filter((f) => isRequired(f.key))
       <el-form label-width="90px">
         <template v-for="f in cfg?.form ?? []" :key="f.key">
           <el-form-item v-if="!f.showIf || f.showIf(f)" :label="f.label"
-            :required="PROJECT_FIELD_KEYS.includes(f.key) ? requireArchiveProject() : (f.required && !editing)">
+            :required="PROJECT_FIELD_KEYS.includes(f.key) ? requireArchiveProject() : (f.required && (!editing || f.requiredOnEdit))">
             <el-color-picker v-if="f.type === 'color'" v-model="form[f.key]" />
             <el-switch v-else-if="f.type === 'switch'" v-model="form[f.key]" />
             <el-input-number v-else-if="f.type === 'number'" v-model="form[f.key]" style="width:100%" />

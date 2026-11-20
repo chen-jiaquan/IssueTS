@@ -20,6 +20,7 @@ export const useAuthStore = defineStore('auth', {
   },
   actions: {
     has(perm) {
+      if (Array.isArray(perm)) return perm.some((p) => this.perms.includes(p))
       return this.perms.includes(perm)
     },
     async login(username, password) {
