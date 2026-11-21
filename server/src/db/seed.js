@@ -47,7 +47,7 @@ const PERMS = [
   { code: 'SECURITY_TAB_PERMISSIONS', module: '用户与权限', name: '二级菜单·权限位', desc: '用户与权限-权限位页签', allow: ['管理员', '项目经理'], no_assign: true },
   { code: 'SECURITY_TAB_MATRIX', module: '用户与权限', name: '二级菜单·角色权限', desc: '用户与权限-角色权限页签', allow: ['管理员', '项目经理'] },
   { code: 'SECURITY_TAB_ALERTS', module: '用户与权限', name: '二级菜单·预警规则', desc: '用户与权限-预警规则页签', allow: ['管理员', '项目经理'], no_assign: true },
-  { code: 'SECURITY_TAB_SETTINGS', module: '用户与权限', name: '二级菜单·系统设置', desc: '用户与权限-系统设置页签', allow: ['管理员'], no_assign: true },
+  { code: 'SECURITY_TAB_SETTINGS', module: '用户与权限', name: '二级菜单·系统设置', desc: '用户与权限-系统设置页签', allow: ['管理员'], no_assign: false },
   { code: 'DATA_EXPORT', module: '数据统计', name: '导出数据', desc: '问题列表与统计报表导出 Excel', allow: ['管理员', '项目经理', '交付顾问'] },
   { code: 'PROJECT_ALL', module: '数据统计', name: '查看全部项目', desc: '跨项目汇总', allow: ['管理员', '项目经理'] },
 ]

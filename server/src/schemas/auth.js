@@ -4,6 +4,8 @@ import { body } from 'express-validator'
 export const loginRules = [
   body('username').isString().trim().notEmpty().withMessage('用户名必填'),
   body('password').isString().notEmpty().withMessage('密码必填'),
+  // 管理员可不选；非管理员由服务层校验项目权限
+  body('project').optional({ nullable: true }).isString().trim().withMessage('项目编码格式非法'),
 ]
 
 export const refreshRules = [

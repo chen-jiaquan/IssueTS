@@ -6,14 +6,21 @@ import { asyncHandler } from '../middleware/error.js'
 import { validate } from '../middleware/validate.js'
 import { loginRules, refreshRules } from '../schemas/auth.js'
 import { authRequired, loadProfile, signAccess, signRefresh, verifyToken } from '../middleware/auth.js'
-import { verifyLogin, findUserById, profileOf } from '../services/auth.js'
+import { verifyLogin, findUserById, profileOf, assertLoginProject, listLoginProjects } from '../services/auth.js'
 
 const router = Router()
 
+// POST /api/auth/login-projects —— 校验账号密码后，只返回该账号可见的已生效项目
+router.post('/login-projects', loginRules, validate, asyncHandler(async (req, res) => {
+  const user = await verifyLogin(req.body.username, req.body.password)
+  ok(res, await listLoginProjects(user))
+}))
+
 // POST /api/auth/login —— 无鉴权
 router.post('/login', loginRules, validate, asyncHandler(async (req, res) => {
-  const { username, password } = req.body
+  const { username, password, project } = req.body
   const user = await verifyLogin(username, password)
+  await assertLoginProject(user, project)
   const profile = await profileOf(user)
   ok(res, {
     accessToken: signAccess({ sub: String(user.id), username: user.username }),

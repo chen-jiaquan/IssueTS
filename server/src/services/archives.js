@@ -5,6 +5,7 @@ import { HttpError, ERR } from '../utils/resp.js'
 import {
   assertProjectsRequired, isSystemAdminRole, SYSTEM_ADMIN_ROLE_CODE, SYSTEM_ADMIN_ROLE_NAME,
 } from '../middleware/scope.js'
+import { isRegistrationReviewer } from '../middleware/rbac.js'
 import { getDefaultUserPassword } from './settings.js'
 
 const UNIQ = '23505' // unique_violation
@@ -30,7 +31,8 @@ const sameCodes = (a, b) => [...a].sort().join('|') === [...b].sort().join('|')
 async function validateProjects(projects) {
   const codes = projects.filter((p) => p !== 'ALL')
   if (!codes.length) return projects
-  const { rows } = await pool.query('SELECT code FROM projects WHERE code = ANY($1)', [codes])
+  // 只有已生效的项目才能被引用（申请中/已拒绝的项目不参与下拉与分配）
+  const { rows } = await pool.query("SELECT code FROM projects WHERE status = '已生效' AND code = ANY($1)", [codes])
   if (rows.length !== codes.length) {
     throw new HttpError(400, ERR.VALIDATION, '所属项目编码不存在', [{ field: 'projects' }])
   }
@@ -74,19 +76,34 @@ function projectScopeClause(scope, project, startIdx, alias = '') {
 }
 
 // ---------- 项目 ----------
-const PROJECT_COLS = 'code, name, note, color, enabled, preset'
-export const listProjects = (scope) => pool.query(
+const PROJECT_COLS = `code, name, note, color, enabled, preset, status, applicant, applied_at,
+  reviewed_by, reviewed_at, review_note`
+// 默认只返回已生效项目，避免申请中的项目进入业务下拉；档案页通过 includePending 查看全部。
+export const listProjects = (scope, includePending = false) => pool.query(
   `SELECT ${PROJECT_COLS} FROM projects WHERE true
+   ${includePending ? '' : "AND status = '已生效'"}
    ${scope === null || scope === undefined ? '' : (scope.length ? 'AND code = ANY($1::text[])' : 'AND FALSE')}
-   ORDER BY code`, scope && scope.length ? [scope] : []).then((r) => r.rows)
+   ORDER BY (status = '申请中') DESC, code`, scope && scope.length ? [scope] : []).then((r) => r.rows)
 export async function createProject(b) {
   try {
-    await pool.query('INSERT INTO projects(code, name, note, color, enabled, preset) VALUES ($1,$2,$3,$4,COALESCE($5,true),COALESCE($6,false))',
+    await pool.query(`INSERT INTO projects(code, name, note, color, enabled, preset, status)
+      VALUES ($1,$2,$3,$4,COALESCE($5,true),COALESCE($6,false),'已生效')`,
       [b.code, b.name ?? b.code, b.note, b.color, b.enabled, b.preset])
     return (await pool.query(`SELECT ${PROJECT_COLS} FROM projects WHERE code=$1`, [b.code])).rows[0]
   } catch (e) { wrap(e) }
 }
-export async function updateProject(code, b) {
+export async function updateProject(code, b, req) {
+  const existing = (await pool.query('SELECT status FROM projects WHERE code=$1', [code])).rows[0]
+  if (!existing) throw new HttpError(404, ERR.NOT_FOUND, '项目不存在')
+  if (existing.status !== '已生效') {
+    // 未生效项目只能由管理员通过审核接口启用，防止绕过审批流。
+    if (b.enabled === true) {
+      throw new HttpError(409, ERR.CONFLICT, '请先通过项目审核使其生效', [{ field: 'enabled' }])
+    }
+    if (!isSystemAdminRole(req?.profile?.role_code, req?.profile?.role)) {
+      throw new HttpError(403, ERR.FORBIDDEN, '该项目处于申请中或已拒绝状态，仅管理员可维护', [{ field: 'code' }])
+    }
+  }
   try {
     const { rows } = await pool.query(
       `UPDATE projects SET name=COALESCE($2,name), note=COALESCE($3,note), color=COALESCE($4,color),
@@ -110,6 +127,48 @@ export async function removeProject(code) {
   if (rows[0].personnel > 0) throw new HttpError(409, ERR.CONFLICT, `该项目下关联 ${rows[0].personnel} 名人员，禁止删除`)
   const { rowCount } = await pool.query('DELETE FROM projects WHERE code=$1', [code])
   if (!rowCount) throw new HttpError(404, ERR.NOT_FOUND, '项目不存在')
+}
+
+// ---------- 项目申请 ----------
+// 登录页可匿名提交；写入项目档案但标记为“申请中”，审核前不可用。
+export async function submitProjectApplication(b) {
+  const code = String(b.code || '').trim()
+  const name = String(b.name || '').trim()
+  const applicant = String(b.applicant || '').trim()
+  const appliedAt = b.applied_at ? new Date(b.applied_at) : new Date()
+  if (Number.isNaN(appliedAt.getTime())) {
+    throw new HttpError(400, ERR.VALIDATION, '申请时间格式非法', [{ field: 'applied_at' }])
+  }
+  try {
+    await pool.query(
+      `INSERT INTO projects(code, name, applicant, applied_at, status, enabled, note)
+       VALUES ($1,$2,$3,$4,'申请中',false,NULL)`,
+      [code, name, applicant, appliedAt],
+    )
+    return (await pool.query(
+      `SELECT ${PROJECT_COLS} FROM projects WHERE code=$1`, [code])).rows[0]
+  } catch (e) {
+    if (e.code === UNIQ) {
+      throw new HttpError(409, ERR.CONFLICT, '项目编码已存在，请勿重复提交', [{ field: 'code' }])
+    }
+    throw e.httpStatus ? e : wrap(e)
+  }
+}
+
+// 仅管理员审核：通过→已生效并启用；拒绝→已拒绝并保持禁用。
+export async function reviewProjectApplication(code, b, actor) {
+  const current = (await pool.query('SELECT status FROM projects WHERE code=$1', [code])).rows[0]
+  if (!current) throw new HttpError(404, ERR.NOT_FOUND, '项目申请不存在')
+  if (current.status !== '申请中') {
+    throw new HttpError(409, ERR.CONFLICT, '该项目申请已处理，不能重复审核', [{ field: 'code' }])
+  }
+  const approve = b.approve === true || b.approve === 'true'
+  const { rows } = await pool.query(
+    `UPDATE projects SET status=$2, enabled=$3, reviewed_by=$4, reviewed_at=now(), review_note=$5
+     WHERE code=$1 RETURNING ${PROJECT_COLS}`,
+    [code, approve ? '已生效' : '已拒绝', approve, actor?.username || actor?.person || '', b.note || null],
+  )
+  return rows[0]
 }
 
 // ---------- 产品 ----------
@@ -189,8 +248,10 @@ async function syncPersonnelUser(person) {
   await createUser({ username, password: await getDefaultUserPassword(base.projects), ...base }, null, { fromPersonnel: true })
 }
 
-const PERSONNEL_COLS = 'code, name, role, "group", color, projects, enabled, preset'
-const PERSONNEL_SELECT = `p.code, p.name, p.role, r.name AS role_name, p."group", p.color, p.projects, p.enabled, p.preset`
+export const PERSONNEL_COLS = `code, name, role, "group", color, projects, enabled, preset,
+  status, applied_at, reviewed_by, reviewed_at, review_note`
+const PERSONNEL_SELECT = `p.code, p.name, p.role, r.name AS role_name, p."group", p.color, p.projects, p.enabled, p.preset,
+  p.status, p.applied_at, p.reviewed_by, p.reviewed_at, p.review_note`
 export const listPersonnel = (scope) => {
   let where = '', params = []
   if (scope !== null && scope !== undefined) {
@@ -202,7 +263,7 @@ export const listPersonnel = (scope) => {
      WHERE true ${where} ORDER BY p.code`, params).then((r) => r.rows)
 }
 
-export async function createPersonnel(b, req) {
+export async function createPersonnel(b, req, options = {}) {
   if (b.role !== undefined) {
     const roleCode = await resolveRoleCode(b.role)
     // 仅系统管理员角色可把人员岗位设为管理员，防止下推产生管理员账号。
@@ -212,14 +273,17 @@ export async function createPersonnel(b, req) {
   }
   await assertPersonNameAvailable(b.name)
   const projects = await validateProjects(normalizeProjects(b.projects))
+  const status = b.status ?? '已生效'
   try {
     const { rows } = await pool.query(
-      `INSERT INTO personnel(code, name, role, "group", color, projects, enabled, preset)
-       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,true),COALESCE($8,false))
+      `INSERT INTO personnel(code, name, role, "group", color, projects, enabled, preset, status, applied_at)
+       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,true),COALESCE($8,false),$9,$10)
        RETURNING ${PERSONNEL_COLS}`,
-      [b.code, b.name, b.role, b.group, b.color, JSON.stringify(projects), b.enabled, b.preset],
+      [b.code, b.name, b.role, b.group, b.color, JSON.stringify(projects),
+        b.enabled, b.preset, status, b.applied_at ?? null],
     )
-    await syncPersonnelUser(rows[0])
+    // 注册申请只写人员档案，待审核通过后才下推用户账号。
+    if (!options.skipUserSync && status === '已生效') await syncPersonnelUser(rows[0])
     return rows[0]
   } catch (e) { throw e.httpStatus ? e : wrap(e) }
 }
@@ -232,8 +296,17 @@ export async function updatePersonnel(code, b, req) {
       throw new HttpError(409, ERR.CONFLICT, '仅系统管理员角色可将人员岗位设为管理员', [{ field: 'role' }])
     }
   }
-  const current = (await pool.query('SELECT name FROM personnel WHERE code=$1', [code])).rows[0]
+  const current = (await pool.query('SELECT name, status FROM personnel WHERE code=$1', [code])).rows[0]
   if (!current) throw new HttpError(404, ERR.NOT_FOUND, '人员不存在')
+  if (current.status !== '已生效') {
+    // 待审核记录不能直接启用或由非审核人编辑，防止绕过注册审批。
+    if (b.enabled === true) {
+      throw new HttpError(409, ERR.CONFLICT, '请先审核该注册申请', [{ field: 'enabled' }])
+    }
+    if (!isRegistrationReviewer(req?.profile)) {
+      throw new HttpError(403, ERR.FORBIDDEN, '该注册申请待审核，仅项目经理或管理员可维护', [{ field: 'code' }])
+    }
+  }
   const linkedUser = await findPersonnelUser(code)
   await assertPersonNameAvailable(b.name ?? current.name, linkedUser?.id ?? null)
   const projects = b.projects === undefined ? null : JSON.stringify(await validateProjects(normalizeProjects(b.projects)))
@@ -245,8 +318,18 @@ export async function updatePersonnel(code, b, req) {
     [code, b.name, b.role, b.group, b.color, projects, b.enabled, b.preset],
   )
   if (!rows.length) throw new HttpError(404, ERR.NOT_FOUND, '人员不存在')
-  await syncPersonnelUser(rows[0])
+  // 未生效的注册记录不触发账号下推，审核接口是唯一生成用户的入口。
+  if (rows[0].status === '已生效') await syncPersonnelUser(rows[0])
   return rows[0]
+}
+
+// 注册审核通过后，按人员档案生成/更新登录账号。
+export async function activatePersonnel(code) {
+  const person = (await pool.query(
+    `SELECT ${PERSONNEL_COLS} FROM personnel WHERE code=$1`, [code])).rows[0]
+  if (!person) throw new HttpError(404, ERR.NOT_FOUND, '人员不存在')
+  await syncPersonnelUser(person)
+  return person
 }
 
 export async function removePersonnel(code) {
@@ -410,9 +493,16 @@ export function getRolePerms(scope, project) {
      JOIN roles r ON r.code = rp.role_code WHERE true${f.clause}
      ORDER BY rp.role_code, rp.perm_code`, f.params).then((r) => r.rows)
 }
-export async function putRolePerms(roleCode, permCodes, actor) {
-  const role = await pool.query('SELECT code, name FROM roles WHERE code=$1', [roleCode])
+export async function putRolePerms(roleCode, permCodes, actor, scope) {
+  const role = await pool.query('SELECT code, name, projects FROM roles WHERE code=$1', [roleCode])
   if (!role.rowCount) throw new HttpError(404, ERR.NOT_FOUND, '角色不存在')
+  // 项目级权限控制：受限用户（scope 非 null）只能修改其可见项目内、或 ALL 的角色授权。
+  if (scope !== null && scope !== undefined) {
+    const own = role.rows[0].projects || []
+    if (!own.includes('ALL') && !scope.some((c) => own.includes(c))) {
+      throw new HttpError(403, ERR.FORBIDDEN, '无权修改该项目的角色权限', [{ field: 'role_code' }])
+    }
+  }
   // 管理员角色（R01/管理员）的权限仅系统管理员角色可修改，防止绕过界面。
   if (isSystemAdminRole(role.rows[0].code, role.rows[0].name)
       && !isSystemAdminRole(actor?.role_code, actor?.role)) {
@@ -450,7 +540,7 @@ export async function putRolePerms(roleCode, permCodes, actor) {
   } finally {
     client.release()
   }
-  return getRolePerms()
+  return getRolePerms(scope)
 }
 
 // ---------- 用户 ----------

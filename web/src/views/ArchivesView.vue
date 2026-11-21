@@ -7,6 +7,8 @@ import BackHome from '@/components/BackHome.vue'
 import { useAuthStore } from '@/store/auth'
 import { ARCHIVE_TAB_PERM } from '@/permissionMenus'
 import * as A from '@/api/archives'
+import * as PA from '@/api/projectApplications'
+import * as RA from '@/api/registration'
 import {
   exportPersonnel, personnelImportFields as fetchPersonnelImportFields,
   readPersonnelHeaders, importPersonnel,
@@ -20,6 +22,20 @@ const currentIsSystemAdmin = computed(() => {
   const name = auth.user?.role
   return code === 'R01' || name === '管理员'
 })
+// 注册审核人：项目经理或管理员
+const canReviewRegistration = computed(() =>
+  currentIsSystemAdmin.value || auth.user?.role_code === 'R02' || auth.user?.role === '项目经理')
+const statusTag = (s) => ({
+  text: s || '已生效',
+  color: s === '申请中' ? '#e6a23c' : (s === '已拒绝' ? '#f56c6c' : '#67c23a'),
+})
+const formatLocalTime = (v) => {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 const ARCHIVE_TAB_KEYS = ['projects', 'products', 'personnel', 'dict', 'custom', 'notice-types', 'todo-prios', 'required']
 const canWriteTab = (key) => auth.has(ARCHIVE_TAB_PERM[key])
 const visibleTabKeys = computed(() => ARCHIVE_TAB_KEYS.filter((key) => canWriteTab(key)))
@@ -89,7 +105,7 @@ async function loadAll() {
     requiredFieldRules.value = req
     // 登录即可读的档案
     const done = await Promise.all([
-      A.listProjects(), A.listProducts(), A.listPersonnel(), A.listDictItems(),
+      A.listProjects(true), A.listProducts(), A.listPersonnel(), A.listDictItems(),
       A.listCustomFields(), A.listNoticeTypes(), A.listTodoPrios(),
     ])
     ;[projects.value, products.value, personnel.value, dictItems.value,
@@ -291,9 +307,13 @@ const presetForm = { key: 'preset', label: '系统预置', type: 'switch', defau
 
 const projectCfg = computed(() => ({
   rowKey: 'code', nameKey: 'name',
-  rows: projects.value, reload: async () => { projects.value = await A.listProjects() },
+  rows: projects.value, reload: async () => { projects.value = await A.listProjects(true) },
   cols: [
     { key: 'code', label: '编码', width: 130 }, { key: 'name', label: '名称', width: 200 },
+    { key: 'status', label: '申请状态', width: 110, render: (row) => statusTag(row.status) },
+    { key: 'applicant', label: '申请人', width: 110 },
+    { key: 'applied_at', label: '申请时间', width: 165,
+      render: (row) => ({ text: formatLocalTime(row.applied_at) }) },
     { key: 'note', label: '备注' }, colorCell('color'), enabledCol, presetCol,
   ],
   form: [
@@ -333,6 +353,9 @@ const personnelCfg = computed(() => ({
     { key: 'role', label: '岗位', width: 130, render: (row) => ({ text: roleLabel(row.role, row) }) }, { key: 'group', label: '所属组' },
     { key: 'projects', label: '所属项目', minWidth: 200,
       render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    { key: 'status', label: '注册状态', width: 110, render: (row) => statusTag(row.status) },
+    { key: 'applied_at', label: '申请时间', width: 165,
+      render: (row) => ({ text: formatLocalTime(row.applied_at) }) },
     enabledCol, presetCol,
   ],
   form: [
@@ -442,6 +465,72 @@ const CFGS = computed(() => ({
 const visibleCFGS = computed(() => Object.fromEntries(
   visibleTabKeys.value.filter((key) => CFGS.value[key]).map((key) => [key, CFGS.value[key]]),
 ))
+
+// ---------- 项目申请审核（仅系统管理员） ----------
+const reviewBusy = ref(false)
+async function reviewProject(row, approve) {
+  if (!currentIsSystemAdmin.value) return
+  let note = ''
+  if (approve) {
+    try {
+      await ElMessageBox.confirm(
+        `确认通过项目「${row.code} ${row.name || ''}」的申请？通过后项目立即生效。`,
+        '审核通过', { type: 'warning', confirmButtonText: '确认通过', cancelButtonText: '取消' },
+      )
+    } catch { return }
+  } else {
+    const res = await ElMessageBox.prompt('请填写拒绝原因（可选）', '拒绝项目申请', {
+      inputType: 'textarea', inputPlaceholder: '审核意见',
+      confirmButtonText: '确认拒绝', cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
+    }).catch(() => null)
+    if (!res) return
+    note = res.value || ''
+  }
+  reviewBusy.value = true
+  try {
+    await PA.reviewProjectApplication(row.code, { approve, note })
+    ElMessage.success(approve ? '审核通过，项目已生效' : '已拒绝该申请')
+    projects.value = await A.listProjects(true)
+  } catch (e) {
+    ElMessage.error(e.message || '审核失败')
+  } finally {
+    reviewBusy.value = false
+  }
+}
+
+// ---------- 注册申请审核（项目经理或管理员） ----------
+const regReviewBusy = ref(false)
+async function reviewRegistration(row, approve) {
+  if (!canReviewRegistration.value) return
+  let note = ''
+  if (approve) {
+    try {
+      await ElMessageBox.confirm(
+        `确认通过「${row.code} ${row.name || ''}」的注册申请？通过后生成用户账号并生效。`,
+        '审核通过', { type: 'warning', confirmButtonText: '确认通过', cancelButtonText: '取消' },
+      )
+    } catch { return }
+  } else {
+    const res = await ElMessageBox.prompt('请填写拒绝原因（可选）', '拒绝注册申请', {
+      inputType: 'textarea', inputPlaceholder: '审核意见',
+      confirmButtonText: '确认拒绝', cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
+    }).catch(() => null)
+    if (!res) return
+    note = res.value || ''
+  }
+  regReviewBusy.value = true
+  try {
+    await RA.reviewRegistration(row.code, { approve, note })
+    ElMessage.success(approve ? '审核通过，用户账号已生成' : '已拒绝该注册申请')
+    personnel.value = await A.listPersonnel()
+  } catch (e) {
+    ElMessage.error(e.message || '审核失败')
+  } finally {
+    regReviewBusy.value = false
+  }
+}
 
 // ---------- 必填字段（按项目过滤配置） ----------
 const reqDirty = ref(false)
@@ -586,15 +675,25 @@ const requiredCountTotal = computed(() =>
               <span v-else>{{ row[col.key] ?? '' }}</span>
             </template>
           </el-table-column>
-          <el-table-column v-if="canWriteTab(key)" label="操作" width="190" fixed="right">
+          <el-table-column v-if="canWriteTab(key)" label="操作" :width="['projects', 'personnel'].includes(key) ? 300 : 190" fixed="right">
             <template #default="{ row }">
-              <el-button link size="small" type="primary" :disabled="isProtectedRow(key, row)"
-                :title="isProtectedRow(key, row) ? '系统预置字典项不允许编辑' : ''" @click="openDialog(c, row)">编辑</el-button>
-              <el-button link size="small" :type="row.enabled === false ? 'success' : 'warning'" :disabled="isProtectedRow(key, row)"
-                :title="isProtectedRow(key, row) ? '系统预置字典项不允许修改' : ''"
+              <el-button link size="small" type="primary"
+                :disabled="isProtectedRow(key, row) || (['projects', 'personnel'].includes(key) && row.status && row.status !== '已生效')"
+                :title="['projects', 'personnel'].includes(key) && row.status && row.status !== '已生效' ? '请先审核该申请' : ''"
+                @click="openDialog(c, row)">编辑</el-button>
+              <el-button link size="small" :type="row.enabled === false ? 'success' : 'warning'"
+                :disabled="isProtectedRow(key, row) || (['projects', 'personnel'].includes(key) && row.status && row.status !== '已生效')"
                 @click="toggleArchive(c, row)">{{ row.enabled === false ? '启用' : '禁用' }}</el-button>
               <el-button link size="small" type="danger" :disabled="isProtectedRow(key, row)"
                 :title="isProtectedRow(key, row) ? '系统预置字典项不允许删除' : ''" @click="removeRow(c, row)">删除</el-button>
+              <template v-if="key === 'projects' && row.status === '申请中' && currentIsSystemAdmin">
+                <el-button link size="small" type="success" :loading="reviewBusy" @click="reviewProject(row, true)">通过</el-button>
+                <el-button link size="small" type="danger" :disabled="reviewBusy" @click="reviewProject(row, false)">拒绝</el-button>
+              </template>
+              <template v-if="key === 'personnel' && row.status === '申请中' && canReviewRegistration">
+                <el-button link size="small" type="success" :loading="regReviewBusy" @click="reviewRegistration(row, true)">通过</el-button>
+                <el-button link size="small" type="danger" :disabled="regReviewBusy" @click="reviewRegistration(row, false)">拒绝</el-button>
+              </template>
             </template>
           </el-table-column>
         </el-table>

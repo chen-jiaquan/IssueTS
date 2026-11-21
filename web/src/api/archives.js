@@ -1,7 +1,8 @@
 import http from './http'
 
 // 项目 / 产品 / 人员 / 字典 / 角色（写操作由后端按二级菜单权限位把关）
-export const listProjects = () => http.get('/archives/projects')
+export const listProjects = (includePending = false) =>
+  http.get('/archives/projects', includePending ? { params: { includePending: 1 } } : {})
 export const createProject = (d) => http.post('/archives/projects', d)
 export const updateProject = (code, d) => http.put(`/archives/projects/${code}`, d)
 export const deleteProject = (code) => http.delete(`/archives/projects/${code}`)

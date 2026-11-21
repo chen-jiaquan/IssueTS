@@ -64,7 +64,7 @@ router.get('/stat-dims', asyncHandler(async (_req, res) => ok(res, STAT_DIMS)))
 // 系统设置：问题导出上限，0=不限制（按二级菜单权限）
 const SETTINGS_PERMS = ['SECURITY_TAB_SETTINGS']
 router.get('/settings/issue-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
-  asyncHandler(async (req, res) => ok(res, await getIssueExportLimit(req.query.project))))
+  asyncHandler(async (req, res) => ok(res, await getIssueExportLimit(req.query.project, req.scope, req))))
 router.put('/settings/issue-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   issueExportLimitRules, validate,
   asyncHandler(async (req, res) => ok(res,
@@ -72,7 +72,7 @@ router.put('/settings/issue-export-limit', loadProfile, attachScope, hasPerm(SET
 
 // 系统设置：人员下推用户时的初始密码
 router.get('/settings/default-user-password', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
-  asyncHandler(async (req, res) => ok(res, await getDefaultUserPassword(req.query.project))))
+  asyncHandler(async (req, res) => ok(res, await getDefaultUserPassword(req.query.project, req.scope, req))))
 router.put('/settings/default-user-password', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   defaultUserPasswordRules, validate,
   asyncHandler(async (req, res) => ok(res,

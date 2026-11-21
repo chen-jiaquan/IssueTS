@@ -65,12 +65,14 @@ router.delete('/permissions/:code', systemAdminOnly, guard(P.SECURITY_PERMISSION
 // ---------- 权限分配矩阵 ----------
 router.get('/role-permissions', guard(P.SECURITY_MATRIX), asyncHandler(async (req, res) => ok(res, await S.getRolePerms(req.scope, req.query.project))))
 router.put('/role-permissions', guard(P.SECURITY_MATRIX), rolePermPutRules, validate, asyncHandler(async (req, res) =>
-  ok(res, await S.putRolePerms(req.body.role_code, req.body.perm_codes, req.profile))))
+  ok(res, await S.putRolePerms(req.body.role_code, req.body.perm_codes, req.profile, req.scope))))
 
 // ---------- 项目 / 产品 / 人员 ----------
-router.get('/projects', asyncHandler(async (req, res) => ok(res, await S.listProjects(req.scope)))) // 按可见项目过滤
+// 默认只返回已生效项目；includePending=1 供档案页展示申请中/已拒绝记录
+router.get('/projects', asyncHandler(async (req, res) => ok(res, await S.listProjects(req.scope,
+  req.query.includePending === '1' || req.query.include_pending === '1')))) // 按可见项目过滤
 router.post('/projects', guard(P.ARCHIVE_PROJECTS), projectRules, validate, asyncHandler(async (req, res) => ok(res, await S.createProject(req.body))))
-router.put('/projects/:id', guard(P.ARCHIVE_PROJECTS), projectRules, validate, asyncHandler(async (req, res) => ok(res, await S.updateProject(req.params.id, req.body))))
+router.put('/projects/:id', guard(P.ARCHIVE_PROJECTS), projectRules, validate, asyncHandler(async (req, res) => ok(res, await S.updateProject(req.params.id, req.body, req))))
 router.delete('/projects/:id', guard(P.ARCHIVE_PROJECTS), asyncHandler(async (req, res) => { await S.removeProject(req.params.id); ok(res) }))
 
 router.get('/products', attachScope, asyncHandler(async (req, res) => ok(res, await S.listProducts(req.scope))))

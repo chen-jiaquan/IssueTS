@@ -46,6 +46,8 @@ const loading = ref(false)
 
 const usersProjectFilter = ref([])
 const rolesProjectFilter = ref([])
+const matrixProjectFilter = ref([])
+const settingsProjectFilter = ref([])
 
 const visibleProjects = () => projects.value.filter((p) => p.enabled !== false && (!auth.scope || auth.scope.includes(p.code)))
 const projectOptions = computed(() => visibleProjects().map((p) => ({ value: p.code, label: `${p.code} ${p.name}` })))
@@ -72,6 +74,20 @@ const filterByProject = (rows, selected) => {
 }
 const filteredUsers = computed(() => filterByProject(users.value, usersProjectFilter.value))
 const filteredRoles = computed(() => filterByProject(roles.value, rolesProjectFilter.value))
+// 角色权限矩阵按所选项目过滤角色列（与后端按项目过滤保持一致的本地视图）。
+const filteredMatrixRoles = computed(() => filterByProject(roles.value, matrixProjectFilter.value))
+// 系统设置：不选项目表示全局默认（管理员可选 ALL 覆盖全部项目），非管理员只能维护具体项目。
+const settingsTargetProjects = computed(() => [...settingsProjectFilter.value])
+const settingsScopeLabel = computed(() => {
+  const codes = settingsTargetProjects.value
+  if (!codes.length) return currentIsSystemAdmin.value ? '全局默认设置' : '项目默认设置（请选择具体项目后保存）'
+  if (codes.includes('ALL')) return '全部项目（ALL）'
+  return codes.map(projectLabel).join('、')
+})
+// 非管理员未选择具体项目（或选择 ALL）时，系统设置字段只读不可编辑。
+const settingsFieldsDisabled = computed(() =>
+  !currentIsSystemAdmin.value
+  && (!settingsTargetProjects.value.length || settingsTargetProjects.value.includes('ALL')))
 
 const roleName = (code) => roles.value.find((r) => r.code === code)?.name ?? code
 const roleColor = (code) => roles.value.find((r) => r.code === code)?.color
@@ -196,7 +212,7 @@ async function loadAllUsers() {
 
 async function loadMatrix() {
   if (!canMatrix) return
-  const rows = await getRolePerms()
+  const rows = await getRolePerms(matrixProjectFilter.value)
   for (const r of roles.value) matrix[r.code] = new Set()
   for (const row of rows) (matrix[row.role_code] ??= new Set()).add(row.perm_code)
 }
@@ -335,9 +351,23 @@ const passwordSaving = ref(false)
 
 async function loadSettings() {
   if (!canSettings) return
-  const [limit, password] = await Promise.all([getIssueExportLimit(), getDefaultUserPassword()])
+  const projects = settingsTargetProjects.value
+  const [limit, password] = await Promise.all([getIssueExportLimit(projects), getDefaultUserPassword(projects)])
   exportLimit.value = limit
   defaultPassword.value = password
+}
+
+function checkSettingsTarget() {
+  const codes = settingsTargetProjects.value
+  if (!currentIsSystemAdmin.value && !codes.length) {
+    ElMessage.warning('非管理员请先选择要维护的项目')
+    return false
+  }
+  if (!currentIsSystemAdmin.value && codes.includes('ALL')) {
+    ElMessage.warning('非管理员不能维护全部项目（ALL）设置')
+    return false
+  }
+  return true
 }
 
 async function saveIssueExportLimit() {
@@ -345,11 +375,12 @@ async function saveIssueExportLimit() {
   if (!Number.isInteger(value) || value < 0 || value > 100000) {
     return ElMessage.warning('导出上限须为 0~100000 的整数')
   }
+  if (!checkSettingsTarget()) return
   settingsSaving.value = true
   try {
-    await putIssueExportLimit(value)
-    exportLimit.value = value
-    ElMessage.success(value === 0 ? '已保存：导出不限制行数' : `已保存：最多导出 ${value} 条`)
+    await putIssueExportLimit(value, settingsTargetProjects.value)
+    ElMessage.success(`${settingsScopeLabel.value}：${value === 0 ? '导出不限制行数' : `最多导出 ${value} 条`}`)
+    await loadSettings()
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -360,10 +391,12 @@ async function saveIssueExportLimit() {
 async function saveDefaultPassword() {
   const value = String(defaultPassword.value || '').trim()
   if (value.length < 6 || value.length > 64) return ElMessage.warning('默认密码须为 6~64 位')
+  if (!checkSettingsTarget()) return
   passwordSaving.value = true
   try {
-    await putDefaultUserPassword(value)
-    ElMessage.success('默认用户密码已保存；后续人员下推用户时使用')
+    await putDefaultUserPassword(value, settingsTargetProjects.value)
+    ElMessage.success(`${settingsScopeLabel.value}：默认用户密码已保存`)
+    await loadSettings()
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -495,12 +528,19 @@ onMounted(async () => {
       <el-tab-pane v-if="canMatrix" label="角色权限" name="matrix">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
           title="勾选即生效前需点列头「保存」；权限变更后用户下次登录/刷新档案生效" />
+        <div class="toolbar">
+          <el-select v-model="matrixProjectFilter" multiple collapse-tags clearable placeholder="按角色所属项目过滤" style="width:260px"
+            @change="loadMatrix">
+            <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
+          </el-select>
+          <span class="tip">共 {{ filteredMatrixRoles.length }} 个角色</span>
+        </div>
         <div class="matrix-wrap">
           <table class="matrix">
             <thead>
               <tr>
                 <th class="first">权限位</th>
-                <th v-for="r in roles" :key="r.code">
+                <th v-for="r in filteredMatrixRoles" :key="r.code">
                   <div class="role-hd">
                     <div>{{ r.code }} {{ r.name }}</div>
                     <div class="role-sub">{{ rowsOfRole(r.code) }}/{{ assignablePerms.length }} 项</div>
@@ -518,7 +558,7 @@ onMounted(async () => {
             <tbody>
               <template v-for="[mod, list] in permGroups" :key="mod">
                 <tr class="group-row">
-                  <td :colspan="roles.length + 1">{{ mod }}</td>
+                  <td :colspan="filteredMatrixRoles.length + 1">{{ mod }}</td>
                 </tr>
                 <tr v-for="p in list" :key="p.code" :class="{ 'no-assign-row': p.no_assign }">
                   <td class="first">
@@ -527,7 +567,7 @@ onMounted(async () => {
                     <span v-if="p.no_assign" class="no-assign-tag">禁止分配</span>
                     <div v-if="p.desc" class="desc">{{ p.desc }}</div>
                   </td>
-                  <td v-for="r in roles" :key="r.code" class="cell">
+                  <td v-for="r in filteredMatrixRoles" :key="r.code" class="cell">
                     <el-checkbox :model-value="matrix[r.code]?.has(p.code)"
                       :disabled="!!p.no_assign || !canEditRolePerms(r.code)"
                       :title="p.no_assign ? '该权限已设为禁止分配，不可在此授权'
@@ -571,26 +611,38 @@ onMounted(async () => {
       <el-tab-pane v-if="canSettings" label="系统设置" name="settings">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
           title="导出上限控制问题列表导出行数；默认密码用于人员档案自动下推生成的用户账号初始密码。" />
+        <div class="toolbar">
+          <el-select v-model="settingsProjectFilter" multiple collapse-tags clearable placeholder="按项目过滤设置" style="width:260px"
+            @change="loadSettings">
+            <el-option v-for="p in projectSelectOptions" :key="p.value" :value="p.value" :label="p.label" />
+          </el-select>
+          <span class="tip">
+            当前范围：{{ settingsScopeLabel }}；
+            {{ settingsFieldsDisabled ? '请先选择具体项目后再编辑' : '非管理员只能维护有权限的具体项目' }}
+          </span>
+        </div>
         <el-form label-width="140px" style="max-width: 560px">
           <el-form-item label="导出记录上限">
             <div style="display:flex; align-items:center; gap:12px; width:100%">
               <el-input-number v-model="exportLimit" :min="0" :max="100000" :step="100"
-                controls-position="right" style="width: 220px" />
+                :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
               <span class="tip">0 = 不限制；最大 100000 条</span>
             </div>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="settingsSaving" @click="saveIssueExportLimit">保存导出设置</el-button>
+            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="settingsSaving"
+              @click="saveIssueExportLimit">保存导出设置</el-button>
           </el-form-item>
           <el-form-item label="默认用户密码">
             <div style="display:flex; align-items:center; gap:12px; width:100%">
               <el-input v-model="defaultPassword" type="password" show-password style="width: 220px"
-                placeholder="至少 6 位" />
+                :disabled="settingsFieldsDisabled" placeholder="至少 6 位" />
               <span class="tip">人员新增/修改后下推用户的初始密码</span>
             </div>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="passwordSaving" @click="saveDefaultPassword">保存默认密码</el-button>
+            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="passwordSaving"
+              @click="saveDefaultPassword">保存默认密码</el-button>
           </el-form-item>
         </el-form>
       </el-tab-pane>

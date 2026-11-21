@@ -62,6 +62,18 @@ const codeName = (codeMax = 32) => [
 export const projectRules = codeName(32)
 export const productRules = [...codeName(32), projectsRule().optional()]
 
+// 登录页项目申请（公开提交）与管理员审核
+export const projectApplicationRules = [
+  body('code').isString().trim().notEmpty().isLength({ max: 32 }).withMessage('项目编码必填（最多 32 字符）'),
+  body('name').isString().trim().notEmpty().isLength({ max: 128 }).withMessage('项目名称必填'),
+  body('applicant').isString().trim().notEmpty().isLength({ max: 64 }).withMessage('申请人必填'),
+  body('applied_at').optional({ nullable: true }).isISO8601().withMessage('申请时间格式非法'),
+]
+export const projectApplicationReviewRules = [
+  body('approve').isBoolean().withMessage('审核结果必须为布尔'),
+  body('note').optional({ nullable: true }).isString().isLength({ max: 255 }).withMessage('审核意见最多 255 字符'),
+]
+
 export const personnelRules = (partial = false) => [
   body('code').if(() => !partial).isString().trim().isLength({ max: 16 }).withMessage('人员编码必填'),
   body('name').if(() => !partial).isString().trim().notEmpty().withMessage('姓名必填'),

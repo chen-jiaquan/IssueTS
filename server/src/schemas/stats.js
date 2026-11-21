@@ -28,7 +28,7 @@ export const homeFilterRules = [
 
 export const noticeBody = [
   body('title').isString().trim().notEmpty().withMessage('标题必填'),
-  body('projects').isArray({ min: 1 }).withMessage('项目必填'),
+  body('projects').optional().isArray(),
   body('projects.*').isString().trim().notEmpty(),
   body('type').optional({ nullable: true }).isString().trim().notEmpty(),
   body('content').optional({ nullable: true }).isString(),

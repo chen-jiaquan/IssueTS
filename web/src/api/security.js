@@ -21,8 +21,8 @@ export const putRolePerms = (roleCode, permCodes) =>
 
 // 系统设置（SECURITY_TAB_SETTINGS）
 export const getIssueExportLimit = (project) => http.get('/config/settings/issue-export-limit', projectParams(project))
-export const putIssueExportLimit = (value) =>
-  http.put('/config/settings/issue-export-limit', { value })
+export const putIssueExportLimit = (value, projects) =>
+  http.put('/config/settings/issue-export-limit', { value, projects })
 export const getDefaultUserPassword = (project) => http.get('/config/settings/default-user-password', projectParams(project))
-export const putDefaultUserPassword = (value) =>
-  http.put('/config/settings/default-user-password', { value })
+export const putDefaultUserPassword = (value, projects) =>
+  http.put('/config/settings/default-user-password', { value, projects })

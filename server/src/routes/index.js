@@ -10,6 +10,8 @@ import logs from './logs.js'
 import notices from './notices.js'
 import todos from './todos.js'
 import projectPlans from './projectPlans.js'
+import projectApplications from './projectApplications.js'
+import registration from './registration.js'
 
 const router = Router()
 
@@ -23,6 +25,8 @@ router.use('/logs', logs)
 router.use('/notices', notices)
 router.use('/todos', todos)
 router.use('/project-plans', projectPlans)
+router.use('/project-applications', projectApplications)
+router.use('/registration', registration)
 router.use('/issues', issues)
 router.use('/stats', stats)
 router.use('/home', home)

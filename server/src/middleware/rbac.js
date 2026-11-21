@@ -23,3 +23,15 @@ export function systemAdminOnly(req, res, next) {
   }
   next()
 }
+
+// 注册审核人：项目经理（R02）或管理员（R01）。
+export const isRegistrationReviewer = (profile) =>
+  isSystemAdminRole(profile?.role_code, profile?.role)
+  || profile?.role_code === 'R02' || profile?.role === '项目经理'
+
+export function registrationReviewerOnly(req, res, next) {
+  if (!isRegistrationReviewer(req.profile)) {
+    return fail(res, 403, ERR.FORBIDDEN, '仅项目经理或管理员可审核注册申请')
+  }
+  next()
+}

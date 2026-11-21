@@ -142,7 +142,6 @@ const noticeAudience = (n) => {
 }
 async function saveNotice() {
   if (!noticeForm.title.trim()) return ElMessage.warning('标题必填')
-  if (!noticeForm.projects.length) return ElMessage.warning('项目必填')
   const payload = { ...noticeForm, date: noticeForm.date || null, type: noticeForm.type || null }
   if (editingNotice.value) await updateNotice(editingNotice.value.id, payload)
   else await createNotice(payload)
@@ -366,8 +365,8 @@ onMounted(async () => {
     <el-dialog v-model="noticeDialog" :title="editingNotice ? '编辑通知' : '新增通知'" width="560px" top="5vh">
       <el-form :model="noticeForm" label-width="80px">
         <el-form-item label="标题" required><el-input v-model="noticeForm.title" maxlength="255" /></el-form-item>
-        <el-form-item label="项目" required>
-          <MultiCheckboxSelect v-model="noticeForm.projects" :options="projectSelectOptions" placeholder="请选择项目（可多选）" filterable />
+        <el-form-item label="项目">
+          <MultiCheckboxSelect v-model="noticeForm.projects" :options="projectSelectOptions" placeholder="可多选，留空则全员可见" filterable />
         </el-form-item>
         <el-form-item label="接收人">
           <MultiCheckboxSelect v-model="noticeForm.recipients" :options="personOptions" placeholder="选择人员（可空，默认通知项目全员）" filterable />

@@ -23,8 +23,8 @@ export const useAuthStore = defineStore('auth', {
       if (Array.isArray(perm)) return perm.some((p) => this.perms.includes(p))
       return this.perms.includes(perm)
     },
-    async login(username, password) {
-      const data = await apiLogin(username, password)
+    async login(username, password, project) {
+      const data = await apiLogin(username, password, project)
       tokens.save(data.accessToken, data.refreshToken)
       this.user = data.user
       return data.user

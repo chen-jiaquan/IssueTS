@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { pool } from '../db/pool.js'
 import { HttpError, ERR } from '../utils/resp.js'
-import { assertProjectsEditable } from '../middleware/scope.js'
+import { isSystemAdminRole } from '../middleware/scope.js'
 
 // 系统设置：兼容历史 app_meta 全局值；新增项目维度设置存 system_settings。
 // 读取优先级：匹配项目 > ALL > 全局(空数组) > app_meta > 默认值。
@@ -16,11 +16,42 @@ const normalizeCodes = (v) => {
   return [...new Set(raw.map((x) => String(x).trim()).filter(Boolean))].sort()
 }
 const normalizeProjects = (v) => normalizeCodes(v)
+const isAdminActor = (req) => isSystemAdminRole(req?.profile?.role_code, req?.profile?.role)
+
+function assertProjectAccess(scope, codes) {
+  if (scope === null || scope === undefined || !codes.length) return
+  for (const code of codes) {
+    if (code === 'ALL' || !scope.includes(code)) {
+      throw new HttpError(403, ERR.SCOPE, `无权访问项目：${code}`)
+    }
+  }
+}
+
+function assertSettingProjectsEditable(req, projects) {
+  if (isAdminActor(req)) return
+  if (!projects.length || projects.includes('ALL')) {
+    throw new HttpError(403, ERR.SCOPE, '非管理员只能维护具体项目的系统设置')
+  }
+  const scope = req?.scope
+  const bad = scope && Array.isArray(scope) ? projects.find((p) => !scope.includes(p)) : null
+  if (bad) throw new HttpError(403, ERR.SCOPE, `无权维护项目：${bad}`)
+}
+
+function visibleSettingRows(rows, scope, canReadGlobal) {
+  // 全局配置（projects 为空）仅管理员及内部服务调用可见；非管理员只能看到 ALL 或具体项目配置。
+  const candidates = canReadGlobal ? rows : rows.filter((r) => (r.projects || []).length)
+  if (scope === null || scope === undefined) return candidates
+  if (!scope.length) return []
+  return candidates.filter((r) => {
+    const own = r.projects || []
+    return own.includes('ALL') || own.some((p) => scope.includes(p))
+  })
+}
 
 async function validateProjects(projects) {
   const codes = projects.filter((p) => p !== 'ALL')
   if (!codes.length) return projects
-  const { rows } = await pool.query('SELECT code FROM projects WHERE code = ANY($1)', [codes])
+  const { rows } = await pool.query("SELECT code FROM projects WHERE status = '已生效' AND code = ANY($1)", [codes])
   if (rows.length !== codes.length) {
     throw new HttpError(400, ERR.VALIDATION, '所属项目编码不存在', [{ field: 'projects' }])
   }
@@ -34,14 +65,16 @@ async function rowsOf(key) {
   return rows
 }
 
-function pickRow(rows, codes) {
+function pickRow(rows, codes, scope, canReadGlobal) {
+  const candidates = visibleSettingRows(rows, scope, canReadGlobal)
   if (codes.length) {
-    const exact = rows.find((r) => (r.projects || []).some((p) => codes.includes(p)))
+    const exact = candidates.find((r) => (r.projects || []).some((p) => codes.includes(p)))
     if (exact) return exact
   }
-  const all = rows.find((r) => (r.projects || []).includes('ALL'))
+  const all = candidates.find((r) => (r.projects || []).includes('ALL'))
   if (all) return all
-  return rows.find((r) => !(r.projects || []).length)
+  if (scope !== null && scope !== undefined) return undefined
+  return canReadGlobal ? candidates.find((r) => !(r.projects || []).length) : undefined
 }
 
 async function appMetaValue(key) {
@@ -49,9 +82,13 @@ async function appMetaValue(key) {
   return rows[0]?.value
 }
 
-async function resolveValue(key, projects, fallback, parse) {
-  const row = pickRow(await rowsOf(key), normalizeCodes(projects))
-  const raw = row?.value ?? await appMetaValue(key)
+async function resolveValue(key, projects, fallback, parse, scope, req) {
+  const codes = normalizeCodes(projects)
+  assertProjectAccess(scope, codes)
+  // 内部服务调用不传 req，保持历史行为；带 req 的接口按角色判断是否能读全局配置。
+  const canReadGlobal = !req || isAdminActor(req)
+  const row = pickRow(await rowsOf(key), codes, scope, canReadGlobal)
+  const raw = row?.value ?? (canReadGlobal && (scope === null || scope === undefined) ? await appMetaValue(key) : undefined)
   return parse(raw, fallback)
 }
 
@@ -64,12 +101,12 @@ function parsePassword(raw) {
   return typeof raw === 'string' && raw.length >= 6 ? raw : DEFAULT_USER_PASSWORD
 }
 
-export async function getIssueExportLimit(projects) {
-  return resolveValue(ISSUE_EXPORT_LIMIT_KEY, projects, DEFAULT_ISSUE_EXPORT_LIMIT, parseLimit)
+export async function getIssueExportLimit(projects, scope, req) {
+  return resolveValue(ISSUE_EXPORT_LIMIT_KEY, projects, DEFAULT_ISSUE_EXPORT_LIMIT, parseLimit, scope, req)
 }
 
-export async function getDefaultUserPassword(projects) {
-  return resolveValue(DEFAULT_USER_PASSWORD_KEY, projects, DEFAULT_USER_PASSWORD, parsePassword)
+export async function getDefaultUserPassword(projects, scope, req) {
+  return resolveValue(DEFAULT_USER_PASSWORD_KEY, projects, DEFAULT_USER_PASSWORD, parsePassword, scope, req)
 }
 
 export const listSettingItems = async () =>
@@ -77,14 +114,21 @@ export const listSettingItems = async () =>
 
 async function upsertSetting(req, key, value, projects, id) {
   const normalized = await validateProjects(normalizeProjects(projects))
-  assertProjectsEditable(req, normalized)
+  assertSettingProjectsEditable(req, normalized)
   const text = String(value)
   if (id) {
+    const { rows: found } = await pool.query(
+      `SELECT ${SETTING_COLS} FROM system_settings WHERE id=$1`, [id])
+    const existing = found[0]
+    if (!existing) throw new HttpError(404, ERR.NOT_FOUND, '系统设置不存在')
+    if (existing.key !== key && !existing.key.startsWith(`${key}:`)) {
+      throw new HttpError(409, ERR.CONFLICT, '设置项类型不匹配', [{ field: 'id' }])
+    }
+    assertSettingProjectsEditable(req, normalizeProjects(existing.projects))
     const { rows } = await pool.query(
       `UPDATE system_settings SET value=$2, projects=$3::text[], updated_at=now()
        WHERE id=$1 RETURNING ${SETTING_COLS}`,
       [id, text, normalized])
-    if (!rows.length) throw new HttpError(404, ERR.NOT_FOUND, '系统设置不存在')
     return rows[0]
   }
   const rows = await rowsOf(key)

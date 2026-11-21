@@ -120,7 +120,7 @@ export async function listNotices(profile, scope) {
   const group = people[0]?.group ?? null
   const params = []
   const projectClause = scope
-    ? `n.projects && $${params.push(scope)}::text[]`
+    ? `(cardinality(n.projects) = 0 OR n.projects && $${params.push(scope)}::text[])`
     : 'TRUE'
   let audienceClause = 'TRUE'
   if (!profile.perms.includes('DASH_NOTICE')) {

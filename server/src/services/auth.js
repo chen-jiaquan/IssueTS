@@ -2,6 +2,7 @@
 import bcrypt from 'bcryptjs'
 import { pool } from '../db/pool.js'
 import { HttpError, ERR } from '../utils/resp.js'
+import { isSystemAdminRole } from '../middleware/scope.js'
 
 const BASE_SELECT = `
   SELECT u.id, u.username, u.person, u.status, u.projects, u.role_code, u.password_hash,
@@ -50,4 +51,41 @@ export async function verifyLogin(username, password) {
     throw new HttpError(403, ERR.FORBIDDEN, '账号已停用，请联系管理员')
   }
   return user
+}
+
+// 登录可见项目口径：null=全部项目；否则为显式项目编码集合。
+// 与数据范围口径一致：['ALL']、显式项目数组、空数组 + PROJECT_ALL 权限位；管理员始终全部。
+async function loginProjectCodes(user) {
+  if (isSystemAdminRole(user.role_code, user.role_name)) return null
+  const own = Array.isArray(user.projects) ? user.projects : []
+  if (own.includes('ALL')) return null
+  if (own.length) return new Set(own)
+  if ((await permsOfRole(user.role_code)).includes('PROJECT_ALL')) return null
+  return new Set()
+}
+
+// 登录页项目下拉：仅返回该账号可见的已生效项目。
+export async function listLoginProjects(user) {
+  const { rows } = await pool.query(
+    "SELECT code, name FROM projects WHERE status='已生效' AND enabled=true ORDER BY code")
+  const codes = await loginProjectCodes(user)
+  return codes === null ? rows : rows.filter((p) => codes.has(p.code))
+}
+
+// 登录项目校验：管理员可不选项目；其余用户必须选择有权限的已生效项目。
+export async function assertLoginProject(user, project) {
+  if (isSystemAdminRole(user.role_code, user.role_name)) return
+  const code = String(project ?? '').trim()
+  if (!code) throw new HttpError(400, ERR.VALIDATION, '请选择登录项目', [{ field: 'project' }])
+
+  const { rows } = await pool.query(
+    "SELECT code FROM projects WHERE code=$1 AND status='已生效' AND enabled=true", [code])
+  if (!rows.length) {
+    throw new HttpError(400, ERR.VALIDATION, '所选项目不存在或已停用', [{ field: 'project' }])
+  }
+
+  const codes = await loginProjectCodes(user)
+  if (codes !== null && !codes.has(code)) {
+    throw new HttpError(403, ERR.FORBIDDEN, `无权访问项目：${code}`, [{ field: 'project' }])
+  }
 }
