@@ -76,7 +76,11 @@ export const cellValue = (v) => {
 // 读取首行表头，供前端字段对照界面使用
 export async function readHeaders(buffer) {
   const wb = new ExcelJS.Workbook()
-  await wb.xlsx.load(buffer)
+  try {
+    await wb.xlsx.load(buffer)
+  } catch {
+    throw new HttpError(400, ERR.VALIDATION, 'Excel 文件解析失败，请确认文件为 .xlsx 格式且未损坏')
+  }
   const ws = wb.worksheets[0]
   if (!ws) throw new HttpError(400, ERR.VALIDATION, '文件无工作表')
   const headers = []

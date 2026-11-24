@@ -24,7 +24,7 @@ const out = (r) => ({
 })
 
 const PLAN_FIELD_LABELS = {
-  project: '项目', parent_id: '上级任务', title: '任务名称', category: '分类',
+  project: '项目', parent_id: '上级任务', seq_no: '序号', title: '任务名称', category: '分类',
   owner: '负责人', assistant1: '配合人1', assistant2: '配合人2',
   start_date: '开始时间', end_date: '完成时间', hours: '工时', man_days: '人天',
   sort: '排序', status: '状态', note: '备注', predecessor: '前置任务', track: '跟踪记录',
@@ -177,10 +177,10 @@ export async function createPlan(body, user, scope) {
     const id = `p${await nextId(client)}`
     const parentId = await assertParent(client, body.parent_id || null, body.project)
     await client.query(
-      `INSERT INTO project_plans(id, project, parent_id, title, owner, assistant1, assistant2, status,
+      `INSERT INTO project_plans(id, project, seq_no, parent_id, title, owner, assistant1, assistant2, status,
          start_date, end_date, hours, man_days, sort, note, category, predecessor, track, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-      [id, body.project, parentId, body.title, body.owner || null,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+      [id, body.project, body.seq_no || null, parentId, body.title, body.owner || null,
         body.assistant1 || null, body.assistant2 || null, body.status || '未开始',
         body.start_date || null, body.end_date || null,
         metrics.hours, metrics.man_days, Number(body.sort || 0), body.note || null,
@@ -213,19 +213,20 @@ async function updateFieldsInTx(client, id, current, body, calendarMap, user, id
   const predecessor = body.predecessor === undefined
     ? (current.predecessor ?? null) : mapPredecessor(body.predecessor, idMap)
   const track = body.track === undefined ? trackOf(current.track) : trackOf(body.track)
+  const seqNo = body.seq_no === undefined ? (current.seq_no || null) : (body.seq_no || null)
   const next = {
-    project, title: body.title ?? current.title, owner: body.owner ?? current.owner,
+    project, seq_no: seqNo, title: body.title ?? current.title, owner: body.owner ?? current.owner,
     assistant1, assistant2, start_date: start, end_date: end,
     hours: metrics.hours, man_days: metrics.man_days,
     sort: Number(body.sort ?? current.sort), status, note: body.note ?? current.note,
     category, predecessor, track,
   }
   await client.query(
-    `UPDATE project_plans SET project=$2, title=$3, owner=$4, assistant1=$5, assistant2=$6, status=$7,
-       start_date=$8, end_date=$9, hours=$10, man_days=$11, sort=$12, note=$13,
-       category=$14, predecessor=$15, track=$16, updated_at=now()
+    `UPDATE project_plans SET project=$2, seq_no=$3, title=$4, owner=$5, assistant1=$6, assistant2=$7, status=$8,
+       start_date=$9, end_date=$10, hours=$11, man_days=$12, sort=$13, note=$14,
+       category=$15, predecessor=$16, track=$17, updated_at=now()
      WHERE id=$1`,
-    [id, next.project, next.title, next.owner, assistant1 || null, assistant2 || null, status,
+    [id, next.project, seqNo, next.title, next.owner, assistant1 || null, assistant2 || null, status,
       next.start_date, next.end_date, next.hours, next.man_days, next.sort, next.note ?? null,
       category, predecessor, JSON.stringify(track)])
   const changes = []
@@ -282,10 +283,10 @@ export async function batchSavePlans(rows, user, scope) {
       await assertVisible(scope, b.project)
       const metrics = planMetrics(b.start_date, b.end_date, calendarMap, b.hours, b.man_days)
       await client.query(
-        `INSERT INTO project_plans(id, project, title, owner, assistant1, assistant2, status,
+        `INSERT INTO project_plans(id, project, seq_no, title, owner, assistant1, assistant2, status,
            start_date, end_date, hours, man_days, sort, note, category, predecessor, track, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-        [a.id, b.project, b.title, b.owner || null, b.assistant1 || null, b.assistant2 || null,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [a.id, b.project, b.seq_no || null, b.title, b.owner || null, b.assistant1 || null, b.assistant2 || null,
           b.status || '未开始', b.start_date || null, b.end_date || null, metrics.hours, metrics.man_days,
           Number(b.sort || 0), b.note || null, b.category || null,
           mapPredecessor(b.predecessor, tempMap), JSON.stringify(trackOf(b.track)), user.username])
@@ -355,11 +356,14 @@ function parseDate(v) {
 const PLAN_FIELDS = [
   { key: 'key', label: '编号（导入用）' },
   { key: 'project', label: '项目' },
+  { key: 'seqNo', label: '序号' },
   { key: 'parentKey', label: '上级编号' },
   { key: 'title', label: '计划名称' },
   { key: 'category', label: '分类' },
   { key: 'predKeys', label: '前置任务编号' },
   { key: 'owner', label: '负责人' },
+  { key: 'assistant1', label: '配合人1' },
+  { key: 'assistant2', label: '配合人2' },
   { key: 'start_date', label: '开始日期' },
   { key: 'end_date', label: '结束日期' },
   { key: 'hours', label: '工时' },
@@ -372,7 +376,7 @@ const PLAN_KEYS = PLAN_FIELDS.map((f) => f.key)
 const PLAN_LABELS = Object.fromEntries(PLAN_FIELDS.map(({ key, label }) => [key, label]))
 const PLAN_HEADER_TO_KEY = Object.fromEntries(PLAN_FIELDS.map(({ key, label }) => [label, key]))
 const PLAN_REQUIRED = ['project', 'title']
-const PLAN_MAX_LEN = { project: 32, title: 255, parentKey: 32, category: 100, owner: 64, status: 32 }
+const PLAN_MAX_LEN = { project: 32, title: 255, parentKey: 32, seqNo: 64, category: 100, owner: 64, assistant1: 64, assistant2: 64, status: 32 }
 
 export const planImportFields = () => PLAN_FIELDS.map(({ key, label }) => ({ key, label }))
 
@@ -387,11 +391,14 @@ export async function exportPlans(scope, project) {
     ws.addRow({
       key: r.id,
       project: r.project,
+      seqNo: r.seq_no || '',
       parentKey: r.parent_id || '',
       title: r.title,
       category: r.category || '',
       predKeys: predecessorStr(r.predecessor) || '',
       owner: r.owner || '',
+      assistant1: r.assistant1 || '',
+      assistant2: r.assistant2 || '',
       start_date: r.start_date || '',
       end_date: r.end_date || '',
       hours: r.hours || 0,
@@ -443,6 +450,8 @@ export async function importPlans(buffer, user, scope, mapping) {
   const errors = []
   const allRows = []
   const calendarMap = await getCalendarMap()
+  const { rows: projectRows } = await pool.query('SELECT code FROM projects')
+  const projectCodes = new Set(projectRows.map((row) => row.code))
   for (let r = 2; r <= ws.rowCount; r += 1) {
     const vals = ws.getRow(r).values
     const obj = { row: r }
@@ -462,8 +471,13 @@ export async function importPlans(buffer, user, scope, mapping) {
         errors.push({ row: r, field: PLAN_LABELS[f], message: `内容过长（最多 ${max} 字，当前 ${len} 字）` })
       }
     }
-    if (obj.project && scope && !scope.includes(obj.project)) {
-      errors.push({ row: r, field: '项目', message: `无权访问项目 ${obj.project}` })
+    if (obj.project) {
+      const project = String(obj.project).trim()
+      if (!projectCodes.has(project)) {
+        errors.push({ row: r, field: '项目', message: `项目 ${project} 不存在` })
+      } else if (scope && !scope.includes(project)) {
+        errors.push({ row: r, field: '项目', message: `无权访问项目 ${project}` })
+      }
     }
     const start_date = parseDate(obj.start_date)
     const end_date = parseDate(obj.end_date)
@@ -476,14 +490,14 @@ export async function importPlans(buffer, user, scope, mapping) {
     }
     const hours = Number(obj.hours) || 0
     const manDays = Number(obj.man_days) || 0
-    if (obj.hours && (Number.isNaN(Number(obj.hours)) || hours < 0)) {
-      errors.push({ row: r, field: '工时', message: '须为非负数字' })
+    if (obj.hours && (Number.isNaN(Number(obj.hours)) || hours < 0 || hours > 99999999.99)) {
+      errors.push({ row: r, field: '工时', message: '须为 0~99999999.99 的数字' })
     }
-    if (obj.man_days && (Number.isNaN(Number(obj.man_days)) || manDays < 0)) {
-      errors.push({ row: r, field: '人天', message: '须为非负数字' })
+    if (obj.man_days && (Number.isNaN(Number(obj.man_days)) || manDays < 0 || manDays > 99999999.99)) {
+      errors.push({ row: r, field: '人天', message: '须为 0~99999999.99 的数字' })
     }
-    if (obj.sort && Number.isNaN(Number(obj.sort))) {
-      errors.push({ row: r, field: '排序', message: '须为数字' })
+    if (obj.sort && !Number.isInteger(Number(obj.sort))) {
+      errors.push({ row: r, field: '排序', message: '须为整数' })
     }
     const metrics = calcPlanMetrics(start_date, end_date, calendarMap)
     const hasRange = !!(start_date && end_date)
@@ -491,12 +505,16 @@ export async function importPlans(buffer, user, scope, mapping) {
       row: r,
       key: obj.key ? String(obj.key).trim() : '',
       project: obj.project ? String(obj.project).trim() : '',
+      seqNo: obj.seqNo ? String(obj.seqNo).trim() : '',
       title: obj.title ? String(obj.title).trim() : '',
       parentKey: obj.parentKey ? String(obj.parentKey).trim() : '',
       predKeys: obj.predKeys ? String(obj.predKeys).split(/[,，]/).map((s) => s.trim()).filter(Boolean) : [],
       category: obj.category ? String(obj.category).trim() : null,
       owner: obj.owner ? String(obj.owner).trim() : null,
+      assistant1: obj.assistant1 ? String(obj.assistant1).trim() : null,
+      assistant2: obj.assistant2 ? String(obj.assistant2).trim() : null,
       start_date, end_date,
+      // 有起止日期时工时/人天一律按工作日历重算，忽略 Excel 中填写的数值
       hours: hasRange ? metrics.hours : hours,
       man_days: hasRange ? metrics.man_days : manDays,
       status: obj.status ? String(obj.status).trim() : '未开始',
@@ -506,8 +524,73 @@ export async function importPlans(buffer, user, scope, mapping) {
   }
   if (!allRows.length) throw await structuralFail(buffer, '无有效数据行')
 
+  // 序号推导层级：1.2 的上级为 1，1.2.3 的上级为 1.2；序号优先于“上级编号”列
+  const seqKeyMap = new Map()
+  for (const row of allRows) {
+    if (row.seqNo && !seqKeyMap.has(row.seqNo)) {
+      seqKeyMap.set(row.seqNo, row.key || `__seq_${row.seqNo}`)
+    }
+  }
+  for (const row of allRows) {
+    if (!row.seqNo) continue
+    const parts = row.seqNo.split('.').filter(Boolean)
+    if (parts.length <= 1) continue
+    const parentSeq = parts.slice(0, -1).join('.')
+    if (seqKeyMap.has(parentSeq)) row.parentKey = seqKeyMap.get(parentSeq)
+    else if (!row.parentKey) errors.push({ row: row.row, field: '序号', message: `上级序号 ${parentSeq} 不在本次导入数据中` })
+  }
+
+  // 任务名称按前端编辑规则补全直接上级名称前缀（与前端 NAME_SEP 一致）
+  const NAME_SEP = ' / '
+  const rowByKey = new Map()
+  for (const row of allRows) {
+    if (row.key) rowByKey.set(row.key, row)
+    if (row.seqNo) rowByKey.set(`__seq_${row.seqNo}`, row)
+  }
+  for (let pass = 0; pass < allRows.length; pass += 1) {
+    let changed = false
+    for (const row of allRows) {
+      if (!row.parentKey) continue
+      const parent = rowByKey.get(row.parentKey)
+      if (!parent) continue
+      const prefix = String(parent.title || '').trim()
+      if (!prefix) continue
+      const full = `${prefix}${NAME_SEP}`
+      const clean = String(row.title || '').trim()
+      if (clean && !clean.startsWith(full)) {
+        row.title = `${full}${clean}`
+        changed = true
+      }
+    }
+    if (!changed) break
+  }
+  for (const row of allRows) {
+    if ([...row.title].length > 255) {
+      errors.push({ row: row.row, field: '计划名称', message: '补全上级名称后超过 255 字' })
+    }
+  }
+
+  // 未填前置任务时，按导入顺序取同项目前一条有完成时间的记录作为前置；
+  // 开始时间始终保留 Excel 导入值，不由该规则改写
+  for (let i = 0; i < allRows.length; i += 1) {
+    const row = allRows[i]
+    if (row.predKeys.length) continue
+    let prev = null
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const candidate = allRows[j]
+      if (candidate.project === row.project && candidate.end_date) {
+        prev = candidate
+        break
+      }
+    }
+    if (!prev) continue
+    const key = prev.key || (prev.seqNo ? `__seq_${prev.seqNo}` : '')
+    if (!key) continue
+    row.predKeys = [key]
+  }
+
   // 层级引用必须在本次导入数据内可解析，否则整行进入失败清单，不写入半截数据
-  const allKeys = new Set(allRows.map((r) => r.key).filter(Boolean))
+  const allKeys = new Set(allRows.flatMap((r) => [r.key, r.seqNo ? `__seq_${r.seqNo}` : ''].filter(Boolean)))
   for (const row of allRows) {
     if (row.parentKey && !allKeys.has(row.parentKey)) {
       errors.push({ row: row.row, field: '上级编号', message: `上级编号 ${row.parentKey} 不在本次导入数据中` })
@@ -530,23 +613,27 @@ export async function importPlans(buffer, user, scope, mapping) {
       const id = `p${seq++}`
       idList.push(id)
       if (r.key) idByKey.set(r.key, id)
+      if (r.seqNo) idByKey.set(`__seq_${r.seqNo}`, id)
       await client.query(
-        `INSERT INTO project_plans(id, project, title, owner, status, start_date, end_date, hours, man_days, sort, note, category, predecessor, track, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-        [id, r.project, r.title, r.owner, r.status, r.start_date, r.end_date, r.hours, r.man_days,
-          r.sort, r.note, r.category, null, JSON.stringify([]), user.username])
+        `INSERT INTO project_plans(id, project, seq_no, title, owner, assistant1, assistant2, status, start_date, end_date, hours, man_days, sort, note, category, predecessor, track, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [id, r.project, r.seqNo || null, r.title, r.owner, r.assistant1, r.assistant2, r.status,
+          r.start_date, r.end_date, r.hours, r.man_days, r.sort, r.note, r.category,
+          null, JSON.stringify([]), user.username])
       await writePlanLogs(client, id, user, [['__create__', '', '导入计划']])
     }
     for (let i = 0; i < valid.length; i += 1) {
       const row = valid[i]
       if (row.parentKey) {
         const parentId = idByKey.get(row.parentKey)
-        try {
-          await assertParent(client, parentId, row.project, idList[i])
-          await client.query('UPDATE project_plans SET parent_id=$2 WHERE id=$1', [idList[i], parentId])
-          parents.add(parentId)
-        } catch (e) {
-          errors.push({ row: row.row, field: '上级编号', message: e.message })
+        if (parentId) {
+          try {
+            await assertParent(client, parentId, row.project, idList[i])
+            await client.query('UPDATE project_plans SET parent_id=$2 WHERE id=$1', [idList[i], parentId])
+            parents.add(parentId)
+          } catch (e) {
+            errors.push({ row: row.row, field: '上级编号', message: e.message })
+          }
         }
       }
       const preds = row.predKeys.map((k) => idByKey.get(k)).filter(Boolean)
@@ -558,7 +645,9 @@ export async function importPlans(buffer, user, scope, mapping) {
     await client.query('COMMIT')
   } catch (e) {
     await client.query('ROLLBACK')
-    throw e
+    if (e.httpStatus) throw e
+    console.error('[plan-import] 写入失败:', e.message)
+    throw new HttpError(400, ERR.VALIDATION, `导入写入失败：${e.message}`)
   } finally {
     client.release()
   }

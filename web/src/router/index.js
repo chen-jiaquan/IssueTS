@@ -7,6 +7,10 @@ const routes = [
   { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue') },
   { path: '/home', name: 'home', component: () => import('@/views/HomeView.vue') },
   {
+    path: '/todo-list', name: 'todo-list', component: () => import('@/views/TodoListView.vue'),
+    meta: { perms: ['DASH_VIEW'] },
+  },
+  {
     path: '/archives', name: 'archives', component: () => import('@/views/ArchivesView.vue'),
     meta: { perms: ARCHIVE_ENTRY_PERMS },
   },

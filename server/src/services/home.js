@@ -202,25 +202,74 @@ export async function getTodoProjects(id) {
 
 export async function listTodos(scope) {
   const { rows } = await pool.query(
-    `SELECT id, text, projects, owner, due, prio, done, created_at FROM todos
+    `SELECT id, text, projects, owner, start_date, due, prio, type, done, created_at FROM todos
      WHERE ${scope ? `(cardinality(projects) = 0 OR projects && $1::text[])` : 'TRUE'}
      ORDER BY done, prio, due NULLS LAST, id`, scope ? [scope] : [])
+  return rows
+}
+
+// 聚合待办：问题（plan_end）+ 项目计划（end_date）+ 手工待办（due/start_date）
+// 规则：截止日期不晚于今天起一周（含逾期）、未完成，按待办类型分类。
+export async function listAggregatedTodos(scope, filters = {}) {
+  const owner = filters.owner || null
+  const type = filters.type || null
+  const params = [scope, owner, type]
+  const { rows } = await pool.query(`
+    WITH agg AS (
+      SELECT 'issue'::text AS source, '问题'::text AS type, i.id::text AS ref,
+             i."desc"::text AS title, i.owner::text AS owner, i.plan_end AS due_date,
+             i.status::text AS status, ARRAY[i.project]::text[] AS projects, i.priority AS prio
+      FROM issues i
+      WHERE ($1::text[] IS NULL OR i.project = ANY($1::text[]))
+        AND ($2::text IS NULL OR i.owner = $2)
+        AND i.plan_end IS NOT NULL AND i.plan_end <= CURRENT_DATE + 7
+        AND i.status NOT IN ('已解决', '关闭')
+
+      UNION ALL
+
+      SELECT 'plan'::text, '计划'::text, p.id::text, p.title::text, p.owner::text,
+             p.end_date, COALESCE(p.status, '未开始')::text, ARRAY[p.project]::text[], NULL::varchar
+      FROM project_plans p
+      WHERE ($1::text[] IS NULL OR p.project = ANY($1::text[]))
+        AND ($2::text IS NULL OR p.owner = $2)
+        AND p.end_date IS NOT NULL AND p.end_date <= CURRENT_DATE + 7
+        AND COALESCE(p.status, '未开始') NOT IN ('已解决', '关闭')
+
+      UNION ALL
+
+      SELECT 'todo'::text, t.type::text, t.id::text, t.text::text, t.owner::text,
+             COALESCE(t.due, t.start_date),
+             (CASE WHEN t.done THEN '关闭' ELSE '未开始' END)::text, t.projects, NULL::varchar
+      FROM todos t
+      WHERE ($1::text[] IS NULL OR cardinality(t.projects) = 0 OR t.projects && $1::text[])
+        AND ($2::text IS NULL OR t.owner = $2)
+        AND t.done = false
+        AND COALESCE(t.due, t.start_date) IS NOT NULL
+        AND COALESCE(t.due, t.start_date) <= CURRENT_DATE + 7
+    )
+    SELECT * FROM agg
+    WHERE ($3::text IS NULL OR type = $3)
+    ORDER BY CASE type WHEN '问题' THEN 1 WHEN '计划' THEN 2 ELSE 3 END,
+             due_date NULLS LAST, owner NULLS LAST, ref`, params)
   return rows
 }
 
 export async function createTodo(body) {
   const id = await nextId('todos', 't')
   const { rows } = await pool.query(
-    'INSERT INTO todos(id, text, projects, owner, due, prio, done) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
-    [id, body.text, strArray(body.projects), body.owner || null, body.due || null, body.prio || 'M', !!body.done])
+    'INSERT INTO todos(id, text, projects, owner, start_date, due, prio, type, done) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
+    [id, body.text, strArray(body.projects), body.owner || null, body.start_date || null,
+      body.due || null, body.prio || 'M', body.type || '手工', !!body.done])
   return rows[0]
 }
 
 export async function updateTodo(id, body) {
   const { rows } = await pool.query(
-    'UPDATE todos SET text=$2, projects=COALESCE($3::text[], projects), owner=$4, due=$5, prio=$6, done=$7 WHERE id=$1 RETURNING *',
+    `UPDATE todos SET text=$2, projects=COALESCE($3::text[], projects), owner=$4,
+       start_date=$5, due=$6, prio=$7, type=$8, done=$9 WHERE id=$1 RETURNING *`,
     [id, body.text, body.projects === undefined ? null : strArray(body.projects),
-      body.owner ?? null, body.due ?? null, body.prio ?? 'M', !!body.done])
+      body.owner ?? null, body.start_date ?? null, body.due ?? null, body.prio ?? 'M',
+      body.type || '手工', !!body.done])
   if (!rows[0]) throw new HttpError(404, ERR.NOT_FOUND, `待办 ${id} 不存在`)
   return rows[0]
 }

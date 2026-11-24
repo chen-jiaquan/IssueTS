@@ -45,9 +45,16 @@ export const todoBody = [
   body('projects').optional().isArray(),
   body('projects.*').optional().isString().trim().notEmpty(),
   body('owner').optional({ nullable: true }).isString(),
+  body('start_date').optional({ nullable: true }).matches(/^\d{4}-\d{2}-\d{2}$/),
   body('due').optional({ nullable: true }).matches(/^\d{4}-\d{2}-\d{2}$/),
   body('prio').optional().isIn(['C', 'H', 'M', 'L']),
+  body('type').optional().isIn(['问题', '计划', '手工']),
   body('done').optional().isBoolean().toBoolean(),
+]
+
+export const aggregateTodoQuery = [
+  query('owner').optional().isString().trim().notEmpty(),
+  query('type').optional().isIn(['问题', '计划', '手工']),
 ]
 
 export const idParam = param('id').isString().trim().notEmpty()

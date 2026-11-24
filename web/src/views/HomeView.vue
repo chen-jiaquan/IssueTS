@@ -12,7 +12,7 @@ import MultiCheckboxSelect from '@/components/MultiCheckboxSelect.vue'
 import CollapsibleList from '@/components/CollapsibleList.vue'
 import {
   getSummary, getAlerts, listNotices, createNotice, updateNotice, deleteNotice,
-  listTodos, createTodo, updateTodo, deleteTodo,
+  listTodos, listAggregatedTodos, createTodo, updateTodo, deleteTodo,
 } from '@/api/home'
 
 const router = useRouter()
@@ -54,6 +54,8 @@ async function loadMeta() {
     const cfg = await http.get('/config/fields', { params: { scope: 1 } })
     cfgProjects.value = cfg.projects || []
     cfgPersonnel.value = cfg.personnel || []
+    const dictTypes = (cfg.dicts?.todo_type || []).filter((t) => t.enabled !== false).map((t) => t.value)
+    todoTypes.value = dictTypes.length ? dictTypes : [...TODO_TYPE_FALLBACK]
   } catch { /* 过滤选项加载失败不影响看板 */ }
   try {
     noticeTypes.value = (await listNoticeTypes()).filter((t) => t.enabled !== false)
@@ -85,8 +87,13 @@ const alertGroups = computed(() => {
     .filter(([, items]) => items.length)
     .map(([key, items]) => ({ key, items, label: ALERT_CATEGORIES.find((c) => c.key === key)?.label || '其他预警' }))
 })
-const latestTodos = computed(() => [...todos.value].sort(
-  (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))))
+const aggTodos = ref([])
+const aggTab = ref('问题')
+const aggGroups = computed(() => {
+  const g = { 问题: [], 计划: [], 手工: [] }
+  for (const r of aggTodos.value) (g[r.type] ?? g.手工).push(r)
+  return g
+})
 
 let statsSeq = 0
 async function loadStats() {
@@ -108,9 +115,10 @@ async function loadAll() {
   if (!auth.has('DASH_VIEW')) return
   await loadStats()
   try {
-    const [n, t] = await Promise.all([listNotices(), listTodos()])
+    const [n, t, a] = await Promise.all([listNotices(), listTodos(), listAggregatedTodos()])
     notices.value = n
     todos.value = t
+    aggTodos.value = a
   } catch (e) {
     ElMessage.error(e.message)
   }
@@ -158,18 +166,28 @@ async function removeNotice(row) {
 // ---------- 待办 ----------
 const todoDialog = ref(false)
 const editingTodo = ref(null)
-const todoForm = reactive({ text: '', projects: [], owner: '', due: '', prio: 'M', done: false })
+const todoForm = reactive({ text: '', projects: [], owner: '', start_date: '', due: '', prio: 'M', type: '手工', done: false })
+const TODO_TYPE_FALLBACK = ['问题', '计划', '手工']
+const todoTypes = ref([])
 
 function openTodo(row = null) {
   editingTodo.value = row
   Object.assign(todoForm, row
-    ? { text: row.text, projects: row.projects || [], owner: row.owner || '', due: row.due ? String(row.due).slice(0, 10) : '', prio: row.prio || 'M', done: row.done }
-    : { text: '', projects: [...filter.project], owner: auth.user?.person || '', due: '', prio: 'M', done: false })
+    ? {
+      text: row.text, projects: row.projects || [], owner: row.owner || '',
+      start_date: fmtDate(row.start_date),
+      due: fmtDate(row.due), prio: row.prio || 'M',
+      type: row.type || '手工', done: row.done,
+    }
+    : {
+      text: '', projects: [...filter.project], owner: auth.user?.person || '',
+      start_date: '', due: '', prio: 'M', type: '手工', done: false,
+    })
   todoDialog.value = true
 }
 async function saveTodo() {
   if (!todoForm.text.trim()) return ElMessage.warning('内容必填')
-  const payload = { ...todoForm, due: todoForm.due || null }
+  const payload = { ...todoForm, start_date: todoForm.start_date || null, due: todoForm.due || null }
   if (editingTodo.value) await updateTodo(editingTodo.value.id, payload)
   else await createTodo(payload)
   ElMessage.success('已保存')
@@ -177,13 +195,30 @@ async function saveTodo() {
   loadAll()
 }
 async function toggleTodo(row) {
-  await updateTodo(row.id, { text: row.text, projects: row.projects || [], owner: row.owner, due: row.due, prio: row.prio, done: row.done })
+  await updateTodo(row.id, {
+    text: row.text, projects: row.projects || [], owner: row.owner,
+    start_date: fmtDate(row.start_date) || null, due: fmtDate(row.due) || null, prio: row.prio,
+    type: row.type || '手工', done: row.done,
+  })
   loadAll()
 }
 async function removeTodo(row) {
   await ElMessageBox.confirm(`删除待办「${row.text}」？`, '删除', { type: 'warning' })
   await deleteTodo(row.id)
   loadAll()
+}
+const findTodo = (ref) => todos.value.find((t) => t.id === ref)
+function toggleAggregateTodo(row, done) {
+  const t = findTodo(row.ref)
+  if (t) { t.done = !!done; toggleTodo(t) }
+}
+function editAggregateTodo(row) {
+  const t = findTodo(row.ref)
+  if (t) openTodo(t)
+}
+function removeAggregateTodo(row) {
+  const t = findTodo(row.ref)
+  if (t) removeTodo(t)
 }
 
 // ---------- 跳转 ----------
@@ -195,7 +230,13 @@ async function doLogout() {
   router.push('/login')
 }
 
-const fmtDate = (v) => (v ? String(v).slice(0, 10) : '')
+function fmtDate(v) {
+  if (!v) return ''
+  const d = v instanceof Date ? v : new Date(v)
+  if (Number.isNaN(d.getTime())) return String(v).slice(0, 10)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
 
 onMounted(async () => {
   await loadMeta()
@@ -330,34 +371,47 @@ onMounted(async () => {
         </CollapsibleList>
       </el-card>
 
-      <!-- 我的待办 -->
+      <!-- 待办事项：问题 / 计划 / 手工分类聚合 -->
       <el-card shadow="never" class="block">
         <template #header>
           <div class="hd">
             <span>待办事项</span>
-            <el-button v-if="auth.has('DASH_TODO')" size="small" type="primary" plain @click="openTodo()">新增</el-button>
+            <div>
+              <el-button size="small" plain @click="router.push('/todo-list')">列表</el-button>
+              <el-button v-if="auth.has('DASH_TODO')" size="small" type="primary" plain @click="openTodo()">新增</el-button>
+            </div>
           </div>
         </template>
-        <CollapsibleList :items="latestTodos" :limit="6" empty-text="暂无待办">
-          <template #item="{ item: t }">
-            <div :key="t.id" class="todo-item" :class="{ done: t.done }">
-              <el-checkbox :model-value="t.done" :disabled="!auth.has('DASH_TODO')" @change="t.done = $event; toggleTodo(t)" />
-              <div class="todo-main">
-                <div class="todo-text">{{ t.text }}</div>
-                <div class="todo-meta">
-                  <el-tag size="small" :type="PRIO[t.prio] || 'info'" effect="plain">{{ PRIO_LABEL[t.prio] || t.prio }}</el-tag>
-                  <el-tag v-for="p in (t.projects || [])" :key="p" size="small" effect="plain">{{ p }}</el-tag>
-                  <span v-if="t.owner"> · {{ t.owner }}</span>
-                  <span v-if="t.due"> · 截止 {{ fmtDate(t.due) }}</span>
+        <el-tabs v-model="aggTab" class="todo-tabs">
+          <el-tab-pane v-for="t in ['问题', '计划', '手工']" :key="t" :name="t">
+            <template #label>{{ t }}（{{ aggGroups[t].length }}）</template>
+            <CollapsibleList :items="aggGroups[t]" :limit="6" empty-text="暂无待办">
+              <template #item="{ item: a }">
+                <div class="todo-item">
+                  <el-checkbox v-if="a.source === 'todo'" :model-value="a.status !== '关闭'" :disabled="!auth.has('DASH_TODO')" @change="toggleAggregateTodo(a, $event)" />
+                  <span v-else class="todo-source-dot" />
+                  <div class="todo-main">
+                    <div class="todo-text">{{ a.title }}</div>
+                    <div class="todo-meta">
+                      <el-tag v-if="a.prio" size="small" :type="PRIO[a.prio] || 'info'" effect="plain">{{ PRIO_LABEL[a.prio] || a.prio }}</el-tag>
+                      <el-tag v-if="a.source !== 'todo'" size="small" effect="plain">{{ a.status }}</el-tag>
+                      <el-tag v-for="p in (a.projects || [])" :key="p" size="small" effect="plain">{{ p }}</el-tag>
+                      <span v-if="a.owner"> · {{ a.owner }}</span>
+                      <span v-if="a.due_date"> · 截止 {{ fmtDate(a.due_date) }}</span>
+                    </div>
+                  </div>
+                  <div class="todo-ops">
+                    <template v-if="a.source === 'todo' && auth.has('DASH_TODO')">
+                      <el-button link size="small" @click="editAggregateTodo(a)">编辑</el-button>
+                      <el-button link size="small" type="danger" @click="removeAggregateTodo(a)">删除</el-button>
+                    </template>
+                    <el-button v-else-if="a.source !== 'todo'" link size="small" @click="a.source === 'issue' ? goIssues() : router.push('/plan')">查看</el-button>
+                  </div>
                 </div>
-              </div>
-              <div v-if="auth.has('DASH_TODO')" class="todo-ops">
-                <el-button link size="small" @click="openTodo(t)">编辑</el-button>
-                <el-button link size="small" type="danger" @click="removeTodo(t)">删除</el-button>
-              </div>
-            </div>
-          </template>
-        </CollapsibleList>
+              </template>
+            </CollapsibleList>
+          </el-tab-pane>
+        </el-tabs>
       </el-card>
     </div>
 
@@ -398,6 +452,12 @@ onMounted(async () => {
           <MultiCheckboxSelect v-model="todoForm.projects" :options="projectSelectOptions" placeholder="选择项目（可空，默认全员可见）" filterable />
         </el-form-item>
         <el-form-item label="负责人"><el-input v-model="todoForm.owner" /></el-form-item>
+        <el-form-item label="开始日期"><el-date-picker v-model="todoForm.start_date" type="date" value-format="YYYY-MM-DD" style="width:100%" /></el-form-item>
+        <el-form-item label="待办类型">
+          <el-select v-model="todoForm.type" style="width:100%">
+            <el-option v-for="t in todoTypes" :key="t" :value="t" :label="t" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="截止"><el-date-picker v-model="todoForm.due" type="date" value-format="YYYY-MM-DD" style="width:100%" /></el-form-item>
         <el-form-item label="优先级">
           <el-select v-model="todoForm.prio" style="width:100%">
@@ -453,4 +513,6 @@ onMounted(async () => {
 .todo-meta { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 2px; }
 .todo-meta .el-tag { margin-right: 4px; }
 .todo-ops { white-space: nowrap; }
+.todo-source-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--el-color-primary); flex: none; }
+.todo-tabs :deep(.el-tabs__header) { margin-bottom: 6px; }
 </style>

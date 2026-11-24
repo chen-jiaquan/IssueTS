@@ -5,6 +5,10 @@ export function notFound(req, res) {
 }
 
 export function errorHandler(err, req, res, _next) {
+  // multer 上传限制：文件过大等给出明确提示，避免 500
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return fail(res, 400, ERR.VALIDATION, '上传文件过大（上限 20MB）')
+  }
   // HttpError：业务异常（含 code/details）
   if (err.httpStatus) {
     return fail(res, err.httpStatus, err.code ?? ERR.SERVER, err.message, err.details)

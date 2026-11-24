@@ -5,7 +5,7 @@ import { validate } from '../middleware/validate.js'
 import { authRequired, loadProfile } from '../middleware/auth.js'
 import { attachScope, assertProjectVisible } from '../middleware/scope.js'
 import { hasPerm } from '../middleware/rbac.js'
-import { todoBody, idParam } from '../schemas/stats.js'
+import { todoBody, idParam, aggregateTodoQuery } from '../schemas/stats.js'
 import * as H from '../services/home.js'
 import { ok } from '../utils/resp.js'
 
@@ -13,6 +13,10 @@ const router = Router()
 router.use(authRequired, loadProfile, attachScope)
 
 router.get('/', hasPerm('DASH_VIEW'), asyncHandler(async (req, res) => ok(res, await H.listTodos(req.scope))))
+
+// 聚合待办：问题 + 项目计划 + 手工待办，按类型分类，截止日期在未来一周内（含逾期）
+router.get('/aggregate', hasPerm('DASH_VIEW'), aggregateTodoQuery, validate,
+  asyncHandler(async (req, res) => ok(res, await H.listAggregatedTodos(req.scope, req.query))))
 
 router.post('/', hasPerm('DASH_TODO'), todoBody, validate,
   asyncHandler(async (req, res) => {
