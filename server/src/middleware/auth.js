@@ -3,16 +3,18 @@ import crypto from 'node:crypto'
 import jwt from 'jsonwebtoken'
 import { config } from '../config/index.js'
 import { fail, ERR } from '../utils/resp.js'
+import { pool } from '../db/pool.js'
 import { findUserById, profileOf } from '../services/auth.js'
+import { getIdleTimeoutMinutes } from '../services/sessions.js'
 
-export function signAccess(payload) {
+export function signAccess(payload, jti = crypto.randomUUID()) {
   return jwt.sign({ ...payload, typ: 'access' }, config.jwt.secret,
-    { expiresIn: config.jwt.accessTtl, jwtid: crypto.randomUUID() })
+    { expiresIn: config.jwt.accessTtl, jwtid: jti })
 }
 
-export function signRefresh(payload) {
+export function signRefresh(payload, jti = crypto.randomUUID()) {
   return jwt.sign({ ...payload, typ: 'refresh' }, config.jwt.secret,
-    { expiresIn: config.jwt.refreshTtl, jwtid: crypto.randomUUID() })
+    { expiresIn: config.jwt.refreshTtl, jwtid: jti })
 }
 
 export function verifyToken(token) {
@@ -20,15 +22,33 @@ export function verifyToken(token) {
   return payload
 }
 
-// 校验 Access Token，注入 req.auth = { uid, username, jti }
-export function authRequired(req, res, next) {
+// 校验 Access Token，注入 req.auth = { uid, username, sid, jti }
+// 带 sid 的令牌会同步校验在线会话并刷新最后活跃时间，被踢下线后立即失效。
+export async function authRequired(req, res, next) {
   const header = req.headers.authorization || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : null
   if (!token) return fail(res, 401, ERR.UNAUTHORIZED, '未登录')
   try {
     const payload = verifyToken(token)
     if (payload.typ !== 'access') return fail(res, 401, ERR.UNAUTHORIZED, '令牌类型错误')
-    req.auth = { uid: Number(payload.sub), username: payload.username, jti: payload.jti }
+    const sid = payload.sid ? Number(payload.sid) : null
+    if (sid) {
+      const idleMinutes = await getIdleTimeoutMinutes()
+      const idle = await pool.query(
+        `UPDATE user_sessions SET ended_at=now(), end_reason='idle'
+         WHERE id=$1 AND access_jti=$2 AND ended_at IS NULL AND expires_at > now()
+           AND last_seen_at < now() - make_interval(mins => $3::int)
+         RETURNING id`, [sid, payload.jti, idleMinutes],
+      )
+      if (idle.rowCount) return fail(res, 401, ERR.UNAUTHORIZED, '长时间未操作，已自动下线')
+      const { rowCount } = await pool.query(
+        `UPDATE user_sessions SET last_seen_at=now()
+         WHERE id=$1 AND access_jti=$2 AND ended_at IS NULL AND expires_at > now()`,
+        [sid, payload.jti],
+      )
+      if (!rowCount) return fail(res, 401, ERR.UNAUTHORIZED, '登录已失效，请重新登录')
+    }
+    req.auth = { uid: Number(payload.sub), username: payload.username, sid, jti: payload.jti }
     next()
   } catch {
     return fail(res, 401, ERR.UNAUTHORIZED, '登录已过期，请重新登录')

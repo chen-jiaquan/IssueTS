@@ -35,6 +35,8 @@ export const issueCreateRules = [
 
 // 编辑：全字段可选（部分更新），有值才校验
 export const issueUpdateRules = [
+  // 乐观锁版本号：前端带回打开记录时的版本，服务端校验是否已被他人修改
+  body('version').optional().isInt({ min: 0 }).toInt(),
   body('project').optional({ nullable: true }).isString().trim().notEmpty(),
   body('desc').optional({ nullable: true }).isString().trim().notEmpty(),
   body('priority').optional({ nullable: true }).isIn(['C', 'H', 'M', 'L']),

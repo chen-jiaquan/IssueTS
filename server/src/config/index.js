@@ -42,3 +42,6 @@ export const config = {
   uploadDir: process.env.UPLOAD_DIR || path.resolve(__dirname, '../../../uploads'),
   publicDir: path.resolve(__dirname, '../../../public'),
 }
+
+// 实际读取的环境文件路径，供系统设置类接口持久化端口配置。
+export const envFilePath = envFile || candidates[0]

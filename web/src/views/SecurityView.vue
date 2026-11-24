@@ -1,6 +1,6 @@
 <script setup>
-// 用户与权限：用户管理 + 角色/权限位/预警规则 + 角色权限矩阵 + 系统设置
-import { ref, reactive, computed, onMounted } from 'vue'
+// 用户与权限：用户管理 + 角色/权限位/预警规则 + 角色权限矩阵 + 系统设置 + 系统状态监控
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '@/components/BackHome.vue'
 import http from '@/api/http'
@@ -14,6 +14,10 @@ import {
 import {
   createRole, updateRole, deleteRole, listAlertRules, putAlertRule,
 } from '@/api/archives'
+import {
+  getMonitorStatus, kickOnlineSession, getPortConfig, updatePortConfig,
+  getIdleTimeout, updateIdleTimeout,
+} from '@/api/monitor'
 
 const auth = useAuthStore()
 const isSystemAdminRole = (code, name) => code === 'R01' || name === '管理员'
@@ -26,11 +30,14 @@ const canPerms = currentIsSystemAdmin.value
 const canMatrix = auth.has(SECURITY_TAB_PERM.matrix)
 const canAlerts = auth.has(['DASH_ALERT', SECURITY_TAB_PERM.alerts])
 const canSettings = auth.has(SECURITY_TAB_PERM.settings)
-const canSecurity = canUsers || canMatrix || canSettings
+// 系统状态监控涉及数据库与服务器资源，仅系统管理员角色可见。
+const canMonitor = currentIsSystemAdmin.value
+const canSecurity = canUsers || canMatrix || canSettings || canMonitor
 const canArchive = canRoles || canPerms
 const canAlert = canAlerts
 const tab = ref(canUsers ? 'users' : canRoles ? 'roles' : canPerms ? 'permissions'
-  : canMatrix ? 'matrix' : canAlerts ? 'alerts' : canSettings ? 'settings' : 'users')
+  : canMatrix ? 'matrix' : canAlerts ? 'alerts' : canSettings ? 'settings'
+    : canMonitor ? 'monitor' : 'users')
 
 // ---------- 基础数据 ----------
 const users = ref([])
@@ -43,6 +50,22 @@ const personnelNames = ref([])
 const matrix = reactive({}) // role_code -> Set(perm_code)
 const savingRole = ref('')
 const loading = ref(false)
+
+const monitor = ref(null)
+const monitorLoading = ref(false)
+const monitorAutoRefresh = ref(true)
+const monitorUpdatedAt = ref('')
+const portConfig = ref({
+  server: { appPort: 3000, listenAddress: '0.0.0.0', env: 'development' },
+  database: { host: 'localhost', port: 5432, name: 'issue_tracker', user: 'issue', poolMax: 20, passwordConfigured: false },
+  redis: { enabled: false, host: 'localhost', port: 6379, passwordConfigured: false },
+  envFile: '.env',
+  restartRequired: true,
+})
+const portSaving = ref(false)
+const idleTimeout = ref({ minutes: 30 })
+const idleSaving = ref(false)
+let monitorTimer = null
 
 const usersProjectFilter = ref([])
 const rolesProjectFilter = ref([])
@@ -404,16 +427,152 @@ async function saveDefaultPassword() {
   }
 }
 
+// ---------- 系统状态监控 ----------
+async function loadMonitor() {
+  if (!canMonitor || monitorLoading.value) return
+  monitorLoading.value = true
+  try {
+    monitor.value = await getMonitorStatus()
+    monitorUpdatedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  } catch (e) {
+    ElMessage.error(e.message || '系统状态加载失败')
+  } finally {
+    monitorLoading.value = false
+  }
+}
+
+const serverAccessCombo = computed(() =>
+  `http://${portConfig.value.server.listenAddress}:${portConfig.value.server.appPort}`)
+const dbConnectionCombo = computed(() => {
+  const db = portConfig.value.database
+  return `postgresql://${db.user}:***@${db.host}:${db.port}/${db.name}（连接池 ${db.poolMax}）`
+})
+const redisConnectionCombo = computed(() => {
+  const redis = portConfig.value.redis
+  return redis.enabled
+    ? `redis://${redis.host}:${redis.port}（密码${redis.passwordConfigured ? '已配置' : '未配置'}）`
+    : '未启用'
+})
+
+async function loadPortSettings() {
+  if (!canMonitor) return
+  try {
+    portConfig.value = await getPortConfig()
+  } catch (e) {
+    ElMessage.error(e.message || '端口配置加载失败')
+  }
+}
+
+async function savePortSettings() {
+  const cfg = portConfig.value
+  const ports = [cfg.server.appPort, cfg.database.port, cfg.redis.port]
+  if (!ports.every((p) => Number.isInteger(Number(p)) && Number(p) >= 1 && Number(p) <= 65535)) {
+    return ElMessage.warning('端口须为 1~65535 的整数')
+  }
+  portSaving.value = true
+  try {
+    portConfig.value = await updatePortConfig({
+      appPort: Number(cfg.server.appPort),
+      dbHost: cfg.database.host,
+      dbPort: Number(cfg.database.port),
+      dbName: cfg.database.name,
+      dbUser: cfg.database.user,
+      poolMax: Number(cfg.database.poolMax),
+      redisEnabled: !!cfg.redis.enabled,
+      redisHost: cfg.redis.host,
+      redisPort: Number(cfg.redis.port),
+    })
+    ElMessage.success('连接配置已保存，重启后端服务后生效')
+  } catch (e) {
+    ElMessage.error(e.message || '连接配置保存失败')
+  } finally {
+    portSaving.value = false
+  }
+}
+
+async function loadIdleSettings() {
+  if (!canMonitor) return
+  try {
+    idleTimeout.value = await getIdleTimeout()
+  } catch (e) {
+    ElMessage.error(e.message || '自动下线配置加载失败')
+  }
+}
+
+async function saveIdleSettings() {
+  const minutes = Number(idleTimeout.value.minutes)
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+    return ElMessage.warning('自动下线时间须为 1~10080 分钟')
+  }
+  idleSaving.value = true
+  try {
+    idleTimeout.value = await updateIdleTimeout(minutes)
+    ElMessage.success('自动下线时间已保存，立即生效')
+    await loadMonitor()
+  } catch (e) {
+    ElMessage.error(e.message || '自动下线配置保存失败')
+  } finally {
+    idleSaving.value = false
+  }
+}
+
+function toggleMonitorAuto(enabled) {
+  if (monitorTimer) {
+    clearInterval(monitorTimer)
+    monitorTimer = null
+  }
+  if (enabled && canMonitor) monitorTimer = setInterval(loadMonitor, 30000)
+}
+
+const formatUptime = (seconds) => {
+  const total = Number(seconds || 0)
+  const days = Math.floor(total / 86400)
+  const hours = Math.floor((total % 86400) / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  return days ? `${days}天 ${hours}小时 ${minutes}分` : `${hours}小时 ${minutes}分`
+}
+
+const formatDuration = (seconds) => {
+  const total = Math.max(0, Number(seconds || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = Math.floor(total % 60)
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
+const formatDateTime = (value) => value
+  ? new Date(value).toLocaleString('zh-CN', { hour12: false })
+  : '—'
+
+async function kickSession(row) {
+  await ElMessageBox.confirm(`确认将 ${row.username || '该用户'} 强制下线？`, '强制下线', { type: 'warning' })
+  try {
+    await kickOnlineSession(row.id)
+    ElMessage.success(`${row.username || '用户'} 已强制下线`)
+    await loadMonitor()
+  } catch (e) {
+    ElMessage.error(e.message || '强制下线失败')
+  }
+}
+
 onMounted(async () => {
   loading.value = true
   try {
     await loadBase()
-    await Promise.all([loadUsers(), loadAllUsers(), loadMatrix(), loadSettings()])
+    await Promise.all([
+      loadUsers(), loadAllUsers(), loadMatrix(), loadSettings(),
+      loadMonitor(), loadPortSettings(), loadIdleSettings(),
+    ])
+    toggleMonitorAuto(monitorAutoRefresh.value)
   } catch (e) {
     ElMessage.error(e.message || '加载失败')
   } finally {
     loading.value = false
   }
+})
+
+onBeforeUnmount(() => {
+  if (monitorTimer) clearInterval(monitorTimer)
 })
 </script>
 
@@ -646,8 +805,200 @@ onMounted(async () => {
           </el-form-item>
         </el-form>
       </el-tab-pane>
+
+      <!-- ========== 系统状态监控 ========== -->
+      <el-tab-pane v-if="canMonitor" label="系统状态监控" name="monitor">
+        <div class="toolbar">
+          <el-button type="primary" :loading="monitorLoading" @click="loadMonitor">刷新</el-button>
+          <el-switch v-model="monitorAutoRefresh" active-text="每 30 秒自动刷新" @change="toggleMonitorAuto" />
+          <span class="tip">最后更新：{{ monitorUpdatedAt || '—' }}</span>
+        </div>
+        <el-card shadow="never" header="访问连接配置" style="margin-bottom: 16px">
+          <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px"
+            title="配置按“服务监听 → PostgreSQL → Redis缓存”分组；保存后需重启后端服务生效，端口还需与实际服务监听端口一致。密码类配置不展示、不在本面板修改。" />
+          <el-row :gutter="20">
+            <el-col :xs="24" :lg="8">
+              <div class="config-group-title">1. 服务监听</div>
+              <el-form label-position="top" @submit.prevent>
+                <el-form-item label="服务端口 APP_PORT">
+                  <el-input-number v-model="portConfig.server.appPort" :min="1" :max="65535"
+                    controls-position="right" style="width: 100%" />
+                </el-form-item>
+              </el-form>
+              <el-descriptions :column="1" border size="small">
+                <el-descriptions-item label="监听地址">{{ portConfig.server.listenAddress }}（固定）</el-descriptions-item>
+                <el-descriptions-item label="运行环境">{{ portConfig.server.env }}</el-descriptions-item>
+                <el-descriptions-item label="访问组合">{{ serverAccessCombo }}</el-descriptions-item>
+              </el-descriptions>
+            </el-col>
+            <el-col :xs="24" :lg="10">
+              <div class="config-group-title">2. PostgreSQL 数据库</div>
+              <el-form label-position="top" @submit.prevent>
+                <el-form-item label="主机 POSTGRES_HOST">
+                  <el-input v-model="portConfig.database.host" placeholder="localhost" />
+                </el-form-item>
+                <el-row :gutter="8">
+                  <el-col :span="12">
+                    <el-form-item label="端口 POSTGRES_PORT">
+                      <el-input-number v-model="portConfig.database.port" :min="1" :max="65535"
+                        controls-position="right" style="width: 100%" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-form-item label="连接池上限 PG_POOL_MAX">
+                      <el-input-number v-model="portConfig.database.poolMax" :min="1" :max="200"
+                        controls-position="right" style="width: 100%" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+                <el-row :gutter="8">
+                  <el-col :span="12">
+                    <el-form-item label="库名 POSTGRES_DB">
+                      <el-input v-model="portConfig.database.name" placeholder="issue_tracker" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-form-item label="用户 POSTGRES_USER">
+                      <el-input v-model="portConfig.database.user" placeholder="issue" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+              </el-form>
+              <div class="tip">连接组合：{{ dbConnectionCombo }}</div>
+            </el-col>
+            <el-col :xs="24" :lg="6">
+              <div class="config-group-title">3. Redis 缓存（可选）</div>
+              <el-form label-position="top" @submit.prevent>
+                <el-form-item label="启用 REDIS_ENABLED">
+                  <el-switch v-model="portConfig.redis.enabled" />
+                </el-form-item>
+                <el-form-item label="主机 REDIS_HOST">
+                  <el-input v-model="portConfig.redis.host" placeholder="localhost" />
+                </el-form-item>
+                <el-form-item label="端口 REDIS_PORT">
+                  <el-input-number v-model="portConfig.redis.port" :min="1" :max="65535"
+                    controls-position="right" style="width: 100%" />
+                </el-form-item>
+              </el-form>
+              <div class="tip">连接组合：{{ redisConnectionCombo }}</div>
+            </el-col>
+          </el-row>
+          <div class="config-footer">
+            <span class="tip">配置文件：{{ portConfig.envFile }}；密码类配置请在服务端环境文件中维护</span>
+            <el-button type="primary" :loading="portSaving" @click="savePortSettings">保存连接配置</el-button>
+          </div>
+        </el-card>
+        <el-card shadow="never" header="在线会话配置" style="margin-bottom: 16px">
+          <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
+            title="在线用户超过配置时间没有任何操作将自动下线；同一用户不允许重复登录，再次登录需确认强制替换原会话。" />
+          <el-form inline @submit.prevent>
+            <el-form-item label="无操作自动下线（分钟）">
+              <el-input-number v-model="idleTimeout.minutes" :min="1" :max="10080" controls-position="right" style="width: 180px" />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="idleSaving" @click="saveIdleSettings">保存自动下线配置</el-button>
+            </el-form-item>
+          </el-form>
+        </el-card>
+        <el-row :gutter="16">
+          <el-col :xs="24" :md="12">
+            <el-card shadow="never" header="数据库监控">
+              <el-descriptions v-if="monitor" :column="1" border size="small">
+                <el-descriptions-item label="数据库">{{ monitor.database.name }}</el-descriptions-item>
+                <el-descriptions-item label="版本">PostgreSQL {{ monitor.database.version }}</el-descriptions-item>
+                <el-descriptions-item label="库大小">{{ monitor.database.size_pretty }}</el-descriptions-item>
+                <el-descriptions-item label="数据库连接">
+                  {{ monitor.database.connections }} / {{ monitor.database.max_connections }}
+                </el-descriptions-item>
+                <el-descriptions-item label="应用连接池">
+                  总数 {{ monitor.database.pool.total }} · 空闲 {{ monitor.database.pool.idle }}
+                  · 等待 {{ monitor.database.pool.waiting }} · 上限 {{ monitor.database.pool.max }}
+                </el-descriptions-item>
+              </el-descriptions>
+              <el-empty v-else description="暂无数据" />
+            </el-card>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <el-card shadow="never" header="服务器资源占用监控">
+              <el-descriptions v-if="monitor" :column="1" border size="small">
+                <el-descriptions-item label="主机">{{ monitor.server.hostname }}</el-descriptions-item>
+                <el-descriptions-item label="平台">{{ monitor.server.platform }} · Node {{ monitor.server.node }}</el-descriptions-item>
+                <el-descriptions-item label="进程运行时间">{{ formatUptime(monitor.server.uptime_seconds) }}</el-descriptions-item>
+                <el-descriptions-item label="CPU">
+                  {{ monitor.server.cpu_count }} 核 · 1 分钟负载 {{ monitor.server.cpu_load_1m }}
+                </el-descriptions-item>
+                <el-descriptions-item label="系统内存">
+                  已用 {{ monitor.server.memory_used_percent }}% · 共 {{ monitor.server.memory_total_mb }} MB
+                </el-descriptions-item>
+                <el-descriptions-item label="进程内存">
+                  RSS {{ monitor.server.process_rss_mb }} MB · Heap {{ monitor.server.process_heap_used_mb }} MB
+                </el-descriptions-item>
+              </el-descriptions>
+              <el-empty v-else description="暂无数据" />
+            </el-card>
+          </el-col>
+        </el-row>
+        <el-card shadow="never" header="用户数登记监控" style="margin-top: 16px">
+          <div class="status-counts">
+            <div class="status-count">
+              <div class="label">用户总数</div>
+              <div class="value">{{ monitor?.users?.total ?? 0 }}</div>
+            </div>
+            <div class="status-count">
+              <div class="label">启用</div>
+              <div class="value success">{{ monitor?.users?.enabled ?? 0 }}</div>
+            </div>
+            <div class="status-count">
+              <div class="label">停用</div>
+              <div class="value warning">{{ monitor?.users?.disabled ?? 0 }}</div>
+            </div>
+            <div class="status-count">
+              <div class="label">系统预置</div>
+              <div class="value">{{ monitor?.users?.preset ?? 0 }}</div>
+            </div>
+            <div class="status-count">
+              <div class="label">近 30 天新增</div>
+              <div class="value primary">{{ monitor?.users?.recent_30d ?? 0 }}</div>
+            </div>
+            <div class="status-count">
+              <div class="label">当前在线</div>
+              <div class="value primary">{{ monitor?.users?.online?.total ?? 0 }}</div>
+            </div>
+          </div>
+
+          <div class="monitor-section-title">按项目在线分布</div>
+          <el-table :data="monitor?.users?.online?.by_project || []" size="small" border>
+            <el-table-column prop="project_code" label="项目编码" width="140" />
+            <el-table-column prop="project_name" label="项目名称" min-width="180" />
+            <el-table-column prop="count" label="在线用户数" width="120" />
+          </el-table>
+
+          <div class="monitor-section-title">在线用户明细（可强制下线）</div>
+          <el-table :data="monitor?.users?.online?.sessions || []" size="small" border max-height="320">
+            <el-table-column prop="username" label="登录账号" width="130" />
+            <el-table-column prop="person" label="姓名" width="110" />
+            <el-table-column prop="role" label="角色" width="120" />
+            <el-table-column prop="project_name" label="登录项目" min-width="160" />
+            <el-table-column label="登录时间" width="170">
+              <template #default="{ row }">{{ formatDateTime(row.login_at) }}</template>
+            </el-table-column>
+            <el-table-column label="在线时长" width="120">
+              <template #default="{ row }">{{ formatDuration(row.online_seconds) }}</template>
+            </el-table-column>
+            <el-table-column label="最后活跃" width="170">
+              <template #default="{ row }">{{ formatDateTime(row.last_seen_at) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="danger" size="small" @click="kickSession(row)">强制下线</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!monitor?.users?.online?.sessions?.length" description="当前没有在线用户" />
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
-    <el-empty v-if="!canSecurity && !canArchive && !canAlert" description="当前账号暂无用户与权限相关操作权限" />
+    <el-empty v-if="!canSecurity && !canArchive && !canAlert && !canMonitor" description="当前账号暂无用户与权限相关操作权限" />
 
     <!-- 用户编辑 -->
     <el-dialog v-model="userDialog" :title="editingUser ? `编辑用户 ${editingUser.username}` : '新增用户'" width="520px">
@@ -747,6 +1098,16 @@ onMounted(async () => {
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .tip { font-size: 12px; color: var(--el-text-color-secondary); }
+.status-counts { display: flex; flex-wrap: wrap; gap: 12px; }
+.status-count { flex: 1 1 130px; padding: 12px 14px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; background: var(--el-fill-color-blank); }
+.status-count .label { font-size: 12px; color: var(--el-text-color-secondary); }
+.status-count .value { margin-top: 6px; font-size: 22px; font-weight: 600; }
+.status-count .value.success { color: var(--el-color-success); }
+.status-count .value.warning { color: var(--el-color-warning); }
+.status-count .value.primary { color: var(--el-color-primary); }
+.monitor-section-title { margin: 14px 0 8px; font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
+.config-group-title { margin-bottom: 12px; padding-left: 8px; border-left: 3px solid var(--el-color-primary); font-size: 13px; font-weight: 600; }
+.config-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--el-border-color-lighter); }
 .matrix-wrap { overflow-x: auto; }
 .matrix { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 880px; }
 .matrix th, .matrix td { border: 1px solid var(--el-border-color-lighter); padding: 6px 8px; }

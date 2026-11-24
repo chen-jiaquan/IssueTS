@@ -52,15 +52,37 @@ const demo = [
 ]
 const fill = (d) => { form.username = d.u; form.password = d.p; form.project = d.project || '' }
 
+async function doLogin(forceLogout = false) {
+  await auth.login(form.username, form.password, form.project, forceLogout)
+  ElMessage.success(`欢迎，${auth.user.person || auth.user.username}`)
+  router.push('/home')
+}
+
 async function submit() {
   await formRef.value.validate()
   loading.value = true
   try {
-    await auth.login(form.username, form.password, form.project)
-    ElMessage.success(`欢迎，${auth.user.person || auth.user.username}`)
-    router.push('/home')
+    await doLogin()
   } catch (err) {
-    ElMessage.error(err.message || '登录失败')
+    const detail = err.body?.details
+    if (detail?.code !== 'SESSION_CONFLICT') {
+      ElMessage.error(err.message || '登录失败')
+    } else {
+      const lines = (detail.sessions || []).map((s) =>
+        `项目：${s.project || 'ALL'}，登录时间：${new Date(s.login_at).toLocaleString('zh-CN', { hour12: false })}`)
+      try {
+        await ElMessageBox.confirm(
+          `账号 ${form.username} 已在其他位置在线，是否强制下线后继续登录？\n${lines.join('\n')}`,
+          '重复登录提示',
+          { type: 'warning', confirmButtonText: '强制下线并登录', cancelButtonText: '取消' },
+        )
+      } catch { return }
+      try {
+        await doLogin(true)
+      } catch (e) {
+        ElMessage.error(e.message || '登录失败')
+      }
+    }
   } finally {
     loading.value = false
   }

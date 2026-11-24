@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Filter } from '@element-plus/icons-vue'
 import BackHome from '@/components/BackHome.vue'
 import TrackRecords from '@/components/TrackRecords.vue'
+import InlineCellEdit from '@/components/InlineCellEdit.vue'
 import { useAuthStore } from '@/store/auth'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import http from '@/api/http'
@@ -398,21 +399,21 @@ const formRef = ref()
 const form = reactive({})
 const formFields = computed(() => meta.value.fields.filter((f) => f.key !== 'track'))
 const dateFields = ['reported_at', 'plan_start', 'plan_end', 'resolved_at', 'customer_test_done']
-const withHistory = (key, options, includeHistory) => {
-  const current = includeHistory ? editing.value?.[key] : null
+const withHistory = (key, options, includeHistory, source = editing.value) => {
+  const current = includeHistory ? source?.[key] : null
   return current && !options.includes(current) ? [current, ...options] : options
 }
-const optionsFor = (key, project, includeHistory = true) => {
+const optionsFor = (key, project, includeHistory = true, source = editing.value) => {
   if (key === 'project') {
-    return withHistory(key, projectOptions.value.map((p) => p.code), includeHistory)
+    return withHistory(key, projectOptions.value.map((p) => p.code), includeHistory, source)
   }
   if (PERSON_KEYS.includes(key)) {
     const base = project === undefined ? allPersonOptions.value : personOptionsFor(project)
-    return withHistory(key, base, includeHistory)
+    return withHistory(key, base, includeHistory, source)
   }
   // 字典项：project_code 为空表示通用；归属项目的选项只在该项目下可见
   const items = dictOf(key).filter((d) => !d.project_code || (project && d.project_code === project))
-  return withHistory(key, items.map((d) => d.value), includeHistory)
+  return withHistory(key, items.map((d) => d.value), includeHistory, source)
 }
 // 按当前项目加载必填配置（全局必填 + 该项目专属必填）
 async function loadRequiredForProject(project) {
@@ -452,6 +453,8 @@ function openCreate() {
   dialog.value = true
   loadRequiredForProject(form.project)
 }
+const isConflict = (e) => e?.status === 409 || e?.body?.code === 40901
+
 async function openEdit(row) {
   const d = await getIssue(row.seq)
   editing.value = d
@@ -462,6 +465,7 @@ async function openEdit(row) {
   }
   form.custom_fields = Object.fromEntries(customFields.value.map((f) => [f.key, d.custom_fields?.[f.key] ?? '']))
   form.track = Array.isArray(d.track) ? d.track : []
+  form.version = d.version ?? 0
   dialog.value = true
   loadRequiredForProject(form.project)
 }
@@ -483,7 +487,13 @@ async function submitForm() {
       if (payload[k] === undefined) payload[k] = null
     }
     if (editing.value) {
-      await updateIssue(editing.value.seq, payload)
+      const res = await updateIssue(editing.value.seq, payload)
+      if (res?.issue?.version !== undefined) {
+        form.version = res.issue.version
+        editing.value.version = res.issue.version
+        const row = list.value.find((r) => r.seq === editing.value.seq)
+        if (row) row.version = res.issue.version
+      }
       ElMessage.success(`问题 #${editing.value.seq} 已保存（变更留痕）`)
     } else {
       const d = await createIssue(payload)
@@ -492,8 +502,123 @@ async function submitForm() {
     dialog.value = false
     load()
   } catch (e) {
+    if (isConflict(e)) {
+      try {
+        await ElMessageBox.confirm(
+          '该问题已被他人修改，刷新将丢失当前填写的内容。是否刷新并重新载入？',
+          '并发冲突', { type: 'warning', confirmButtonText: '刷新', cancelButtonText: '保留修改' },
+        )
+        await openEdit(editing.value)
+        await load()
+      } catch { /* 用户选择保留当前修改 */ }
+      return
+    }
     ElMessage.error(e.message)
   }
+}
+
+// ---------- 单元格编辑：单击行内编辑，双击打开卡片 ----------
+const inlineEdit = ref(null) // { seq, key, value, type, custom }
+const inlineBusy = ref(false)
+let clickTimer = null
+const CLICK_DELAY = 220 // 等待双击判定，避免单击先打开行内编辑器
+
+const isInlineEditing = (row, key) =>
+  inlineEdit.value?.seq === row.seq && inlineEdit.value?.key === key
+
+const editableKeys = computed(() => new Set(columns.value.map((c) => c.key)))
+const canEditCell = (key) => auth.has('ISSUE_EDIT') && editableKeys.value.has(key)
+
+function inlineCellProps(row, key) {
+  const cf = customFields.value.find((f) => f.key === key)
+  let type = 'text'
+  if (dateFields.includes(key) || cf?.type === 'date') type = 'date'
+  else if (PERSON_KEYS.includes(key) || optionsFor(key, row.project, false, row).length) type = 'select'
+  else if (['desc', 'solution'].includes(key) || cf?.type === 'textarea') type = 'textarea'
+  else if (cf?.type === 'number') type = 'number'
+  const raw = cf ? row.custom_fields?.[key] : row[key]
+  return {
+    modelValue: type === 'date' ? fmtDate(raw) : (raw ?? ''),
+    type,
+    options: type === 'select' ? optionsFor(key, row.project, true, row) : [],
+  }
+}
+
+function startInlineEdit(row, key) {
+  if (inlineBusy.value) return
+  const props = inlineCellProps(row, key)
+  inlineEdit.value = {
+    seq: row.seq, key, value: props.modelValue, type: props.type,
+    custom: !!customFields.value.find((f) => f.key === key),
+  }
+}
+
+function cancelInlineEdit() {
+  inlineEdit.value = null
+}
+
+async function saveInlineEdit(value) {
+  const cur = inlineEdit.value
+  if (!cur || inlineBusy.value) return
+  const row = list.value.find((r) => r.seq === cur.seq)
+  if (!row) return cancelInlineEdit()
+
+  const oldRaw = cur.custom ? row.custom_fields?.[cur.key] : row[cur.key]
+  const next = value === null || value === undefined ? '' : value
+  const oldValue = cur.type === 'date' ? fmtDate(oldRaw) : (oldRaw ?? '')
+  if (String(oldValue ?? '') === String(next ?? '')) return cancelInlineEdit()
+
+  const required = cur.custom ? meta.value.required.includes(cur.key)
+    : ['project', 'desc', 'priority', 'status'].includes(cur.key) || meta.value.required.includes(cur.key)
+  if (required && (next === '' || next === null)) {
+    ElMessage.warning(`「${fieldLabel(cur.key)}」不能为空`)
+    return cancelInlineEdit()
+  }
+
+  inlineBusy.value = true
+  try {
+    const nullable = ['stage', 'type', 'module', 'impact', 'reporter', 'owner', 'developer',
+      'pending_test', 'customer_test', 'solution', 'image_url']
+    const payload = cur.custom
+      ? { custom_fields: { ...(row.custom_fields || {}), [cur.key]: next } }
+      : { [cur.key]: next === '' && (cur.type === 'date' || nullable.includes(cur.key)) ? null : next }
+    // 与卡片编辑一致：实际完成有日期且客户测试=是 → 状态自动置为已解决
+    const resolvedAt = 'resolved_at' in payload ? payload.resolved_at : row.resolved_at
+    const customerTest = 'customer_test' in payload ? payload.customer_test : row.customer_test
+    if (resolvedAt && customerTest === '是') payload.status = '已解决'
+    const res = await updateIssue(cur.seq, { ...payload, version: row.version })
+    Object.assign(row, payload)
+    if (res?.issue?.version !== undefined) row.version = res.issue.version
+    ElMessage.success(`问题 #${cur.seq} 的「${fieldLabel(cur.key)}」已更新`)
+  } catch (e) {
+    if (isConflict(e)) {
+      ElMessage.warning('该问题已被他人修改，正在刷新为最新数据')
+      try { await load() } catch { /* 保留现有列表数据 */ }
+    } else {
+      ElMessage.error(e.message)
+    }
+  } finally {
+    inlineBusy.value = false
+    cancelInlineEdit()
+  }
+}
+
+function onCellClick(row, column) {
+  const key = column?.property
+  clearTimeout(clickTimer)
+  if (!key || !canEditCell(key)) return
+  const cur = inlineEdit.value
+  if (cur && cur.seq === row.seq && cur.key === key) return
+  if (cur) cancelInlineEdit()
+  clickTimer = setTimeout(() => startInlineEdit(row, key), CLICK_DELAY)
+}
+
+function onCellDblclick(row, column) {
+  const key = column?.property
+  clearTimeout(clickTimer)
+  if (!key || !canEditCell(key) || inlineBusy.value) return
+  cancelInlineEdit()
+  openEdit(row)
 }
 
 // 图片上传
@@ -803,20 +928,23 @@ onMounted(async () => {
     <!-- 表格 -->
     <el-table ref="tableRef" :data="list" v-loading="loading" size="small" border stripe
       :max-height="lockMode ? TABLE_MAX_HEIGHT : undefined"
-      @selection-change="selected = $event" @filter-change="onFilterChange">
+      @selection-change="selected = $event" @filter-change="onFilterChange"
+      @cell-click="onCellClick" @cell-dblclick="onCellDblclick">
       <el-table-column type="selection" width="40" :fixed="leftFixed" />
       <el-table-column prop="seq" label="序号" width="60" :fixed="leftFixed" />
       <template v-for="(c, i) in columns" :key="c.key">
         <!-- 项目列：无筛选漏斗（过滤在工具栏），锁定行列时左侧固定 -->
         <el-table-column v-if="c.key === 'project'" :prop="c.key" :label="fieldLabel(c.key)"
-          :label-class-name="`col-key-${c.key}`" :min-width="contentWidths.project" :fixed="colFixed(i)">
+          :label-class-name="`col-key-${c.key}`" :min-width="contentWidths.project" :fixed="colFixed(i)" class-name="editable-cell">
           <template #default="{ row }">
-            <el-tag v-if="row[c.key]" size="small" :style="tagStyle('project', row[c.key])">{{ row[c.key] }}</el-tag>
+            <InlineCellEdit v-if="isInlineEditing(row, c.key)" v-bind="inlineCellProps(row, c.key)"
+              @save="saveInlineEdit" @cancel="cancelInlineEdit" />
+            <el-tag v-else-if="row[c.key]" size="small" :style="tagStyle('project', row[c.key])">{{ row[c.key] }}</el-tag>
           </template>
         </el-table-column>
         <!-- 日期列：单列树筛选，通过 + 逐级展开；父节点勾选默认全选下级 -->
         <el-table-column v-else-if="isDateKey(c.key)" :prop="c.key" :label="fieldLabel(c.key)"
-          :label-class-name="`col-key-${c.key}`" :min-width="contentWidths[c.key] ?? 110" :fixed="colFixed(i)">
+          :label-class-name="`col-key-${c.key}`" :min-width="contentWidths[c.key] ?? 110" :fixed="colFixed(i)" class-name="editable-cell">
           <template #header>
             <div class="date-filter-header">
               <span>{{ fieldLabel(c.key) }}</span>
@@ -840,15 +968,20 @@ onMounted(async () => {
             </div>
           </template>
           <template #default="{ row }">
-            <span>{{ fmtDate(row[c.key]) }}</span>
+            <InlineCellEdit v-if="isInlineEditing(row, c.key)" v-bind="inlineCellProps(row, c.key)"
+              @save="saveInlineEdit" @cancel="cancelInlineEdit" />
+            <span v-else>{{ fmtDate(row[c.key]) }}</span>
           </template>
         </el-table-column>
         <!-- 其他列：普通 Excel 式多选筛选 -->
         <el-table-column v-else :prop="c.key" :label="fieldLabel(c.key)" :label-class-name="`col-key-${c.key}`"
           :min-width="contentWidths[c.key] ?? (c.key === 'desc' ? 200 : 110)"
-          :fixed="colFixed(i)" :filters="columnFilters[c.key]" :filtered-value="query[c.key]" :filter-method="() => true">
+          :fixed="colFixed(i)" :filters="columnFilters[c.key]" :filtered-value="query[c.key]" :filter-method="() => true"
+          class-name="editable-cell">
           <template #default="{ row }">
-            <el-tag v-if="c.dict && row[c.key]" size="small" :style="tagStyle(c.dict, row[c.key])">{{ row[c.key] }}</el-tag>
+            <InlineCellEdit v-if="isInlineEditing(row, c.key)" v-bind="inlineCellProps(row, c.key)"
+              @save="saveInlineEdit" @cancel="cancelInlineEdit" />
+            <el-tag v-else-if="c.dict && row[c.key]" size="small" :style="tagStyle(c.dict, row[c.key])">{{ row[c.key] }}</el-tag>
             <el-tag v-else-if="c.key === 'priority'" size="small" :type="prioTagType(row.priority)">{{ row.priority }}</el-tag>
             <span v-else>{{ c.custom ? (row.custom_fields?.[c.key] ?? '') : row[c.key] }}</span>
           </template>
@@ -1008,6 +1141,9 @@ onMounted(async () => {
 .toolbar { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
 :deep(th[draggable='true']) { cursor: grab; }
 :deep(th[draggable='true']:active) { cursor: grabbing; }
+/* 单击单元格可编辑，双击打开卡片 */
+:deep(td.editable-cell) { cursor: text; }
+:deep(td.editable-cell .cell) { padding: 2px 6px; }
 /* 分页固定在浏览器视口右下角，随窗口自适应 */
 .pager {
   position: fixed;

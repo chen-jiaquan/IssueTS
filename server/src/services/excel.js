@@ -64,7 +64,7 @@ const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) &&
   new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s
 const clean = (v) => (v === null || v === undefined ? '' : String(v).trim())
 const pad = (n) => String(n).padStart(2, '0')
-const cellValue = (v) => {
+export const cellValue = (v) => {
   if (v === null || v === undefined) return ''
   if (v instanceof Date) return `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`
   const s = String(v).trim()
@@ -114,11 +114,11 @@ async function buildStructuralFailFile(buffer, message) {
   await writeFile(path.join(config.uploadDir, name), Buffer.from(await out.xlsx.writeBuffer()))
   return `/uploads/${name}`
 }
-const structuralFail = async (buffer, message) =>
+export const structuralFail = async (buffer, message) =>
   new HttpError(400, ERR.VALIDATION, message, { failUrl: await buildStructuralFailFile(buffer, message) })
 
 // 失败清单：与原表相同列 + 错误说明，只保留失败行，供修改后重新导入
-async function buildFailFile(buffer, ws, headers, failedRows, errors) {
+export async function buildFailFile(buffer, ws, headers, failedRows, errors) {
   const wb = new ExcelJS.Workbook()
   const out = wb.addWorksheet('失败记录')
   const labels = headers.map((h) => h.label)

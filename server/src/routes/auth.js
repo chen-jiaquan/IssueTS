@@ -7,6 +7,10 @@ import { validate } from '../middleware/validate.js'
 import { loginRules, refreshRules } from '../schemas/auth.js'
 import { authRequired, loadProfile, signAccess, signRefresh, verifyToken } from '../middleware/auth.js'
 import { verifyLogin, findUserById, profileOf, assertLoginProject, listLoginProjects } from '../services/auth.js'
+import {
+  createTokenIds, createSession, refreshSession, endSession, endSessionByRefreshJti,
+  getIdleTimeoutMinutes, expireIdleSessions, listActiveSessions, endAllUserSessions,
+} from '../services/sessions.js'
 
 const router = Router()
 
@@ -18,13 +22,36 @@ router.post('/login-projects', loginRules, validate, asyncHandler(async (req, re
 
 // POST /api/auth/login —— 无鉴权
 router.post('/login', loginRules, validate, asyncHandler(async (req, res) => {
-  const { username, password, project } = req.body
+  const { username, password, project, forceLogout } = req.body
   const user = await verifyLogin(username, password)
   await assertLoginProject(user, project)
+  const idleMinutes = await getIdleTimeoutMinutes()
+  await expireIdleSessions(user.id, idleMinutes)
+  const activeSessions = await listActiveSessions(user.id)
+  if (activeSessions.length && !forceLogout) {
+    return fail(res, 409, ERR.CONFLICT, '该账号已在其他位置登录', {
+      code: 'SESSION_CONFLICT',
+      sessions: activeSessions.map((s) => ({
+        id: s.id,
+        project: s.login_project || 'ALL',
+        login_at: s.login_at,
+        last_seen_at: s.last_seen_at,
+      })),
+    })
+  }
+  if (activeSessions.length) await endAllUserSessions(user.id, 'kicked')
   const profile = await profileOf(user)
+  const { accessJti, refreshJti } = createTokenIds()
+  const session = await createSession({
+    userId: user.id,
+    username: user.username,
+    loginProject: project || null,
+    accessJti,
+    refreshJti,
+  })
   ok(res, {
-    accessToken: signAccess({ sub: String(user.id), username: user.username }),
-    refreshToken: signRefresh({ sub: String(user.id), username: user.username }),
+    accessToken: signAccess({ sub: String(user.id), username: user.username, sid: String(session.id) }, accessJti),
+    refreshToken: signRefresh({ sub: String(user.id), username: user.username }, refreshJti),
     user: profile,
   })
 }))
@@ -44,8 +71,11 @@ router.post('/refresh', refreshRules, validate, asyncHandler(async (req, res) =>
   if (rows.length) return fail(res, 401, ERR.UNAUTHORIZED, 'Refresh Token 已失效，请重新登录')
   const user = await findUserById(Number(payload.sub))
   if (!user || user.status !== '启用') return fail(res, 401, ERR.UNAUTHORIZED, '账号不可用')
+  const { accessJti } = createTokenIds()
+  const session = await refreshSession(payload.jti, accessJti)
+  if (!session) return fail(res, 401, ERR.UNAUTHORIZED, '会话已失效，请重新登录')
   ok(res, {
-    accessToken: signAccess({ sub: String(user.id), username: user.username }),
+    accessToken: signAccess({ sub: String(user.id), username: user.username, sid: String(session.id) }, accessJti),
     user: await profileOf(user),
   })
 }))
@@ -66,6 +96,7 @@ router.post('/logout', authRequired, asyncHandler(async (req, res) => {
       // 无效 refreshToken 忽略（已过期即自然失效）
     }
   }
+  await endSession(req.auth?.sid, 'logout')
   ok(res, null, '已登出')
 }))
 

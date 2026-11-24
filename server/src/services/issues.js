@@ -251,15 +251,26 @@ export async function createIssue(body, user) {
 // ---------- 编辑（字段级留痕） ----------
 export async function updateIssue(seq, body, user, scope) {
   const old = await getIssueBySeq(seq, scope)
+  // 乐观锁：前端带回打开记录时的版本号；与库中不一致说明已被他人修改
+  const expected = body.version
+  if (expected !== undefined && Number(expected) !== Number(old.version)) {
+    throw new HttpError(409, ERR.CONFLICT,
+      `问题 #${seq} 已被他人修改（当前版本 ${old.version}），请刷新后重试`)
+  }
   await assertIssueArchivesEnabled(body, old)
   const changed = ISSUE_FIELDS.filter((k) => body[k] !== undefined && norm(old[k]) !== norm(body[k]))
   if (!changed.length) return { issue: old, changed: [] }
 
   const sets = changed.map((k, i) => `${k === 'desc' ? '"desc"' : k} = $${i + 2}`)
   const vals = changed.map((k) => (['track', 'custom_fields'].includes(k) ? JSON.stringify(body[k]) : body[k]))
+  sets.push('version = version + 1')
+  const params = [seq, ...vals]
+  if (expected !== undefined) params.push(expected)
+  const versionCond = expected !== undefined ? ` AND version = $${params.length}` : ''
   const { rows } = await pool.query(
-    `UPDATE issues SET ${sets.join(', ')}, updated_at = now() WHERE seq = $1 RETURNING *`,
-    [seq, ...vals])
+    `UPDATE issues SET ${sets.join(', ')}, updated_at = now() WHERE seq = $1${versionCond} RETURNING *`,
+    params)
+  if (!rows.length) throw new HttpError(409, ERR.CONFLICT, `问题 #${seq} 已被他人修改，请刷新后重试`)
   const issue = rows[0]
 
   const client = await pool.connect()
@@ -322,7 +333,7 @@ export async function assign(seq, field, value, user, scope) {
   if (norm(issue[field]) === norm(value)) return { issue, notice: null }
   await assertIssueArchivesEnabled({ [field]: value }, issue)
   const { rows } = await pool.query(
-    `UPDATE issues SET ${field} = $2, updated_at = now() WHERE id = $1 RETURNING *`, [issue.id, value])
+    `UPDATE issues SET ${field} = $2, updated_at = now(), version = version + 1 WHERE id = $1 RETURNING *`, [issue.id, value])
   await pool.query(
     'INSERT INTO issue_logs(issue_id, issue_seq, changed_by, field_key, field_label, before_value, after_value) VALUES ($1,$2,$3,$4,$5,$6,$7)',
     [issue.id, seq, user.username, field, FIELD_LABELS[field], norm(issue[field]), value])

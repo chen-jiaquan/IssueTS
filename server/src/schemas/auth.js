@@ -6,6 +6,7 @@ export const loginRules = [
   body('password').isString().notEmpty().withMessage('密码必填'),
   // 管理员可不选；非管理员由服务层校验项目权限
   body('project').optional({ nullable: true }).isString().trim().withMessage('项目编码格式非法'),
+  body('forceLogout').optional().isBoolean().withMessage('forceLogout 须为布尔值'),
 ]
 
 export const refreshRules = [
