@@ -10,6 +10,7 @@ import {
   listUsers, createUser, updateUser, deleteUser,
   listRoles, listPermissions, updatePermission, getRolePerms, putRolePerms,
   getIssueExportLimit, putIssueExportLimit, getDefaultUserPassword, putDefaultUserPassword,
+  getPlanExportLimit, putPlanExportLimit, getReportExportLimit, putReportExportLimit,
   getTodoDueDays, putTodoDueDays, getTodoStatuses, putTodoStatuses,
 } from '@/api/security'
 import {
@@ -112,6 +113,8 @@ const settingsScopeLabel = computed(() => {
 const settingsFieldsDisabled = computed(() =>
   !currentIsSystemAdmin.value
   && (!settingsTargetProjects.value.length || settingsTargetProjects.value.includes('ALL')))
+// 自动下线是全局会话安全配置，仅管理员可维护。
+const idleConfigDisabled = computed(() => !currentIsSystemAdmin.value)
 
 const roleName = (code) => roles.value.find((r) => r.code === code)?.name ?? code
 const roleColor = (code) => roles.value.find((r) => r.code === code)?.color
@@ -368,7 +371,10 @@ async function saveRole(roleCode) {
 const rowsOfRole = (roleCode) => assignablePerms.value.filter((p) => matrix[roleCode]?.has(p.code)).length
 
 // ---------- 系统设置 ----------
+const settingsSubTab = ref('plan')
 const exportLimit = ref(0)
+const planExportLimit = ref(0)
+const reportExportLimit = ref(0)
 const defaultPassword = ref('')
 const settingsSaving = ref(false)
 const passwordSaving = ref(false)
@@ -381,11 +387,14 @@ const todoStatusesSaving = ref(false)
 async function loadSettings() {
   if (!canSettings) return
   const projects = settingsTargetProjects.value
-  const [limit, password, days, statuses, cfg] = await Promise.all([
-    getIssueExportLimit(projects), getDefaultUserPassword(projects),
-    getTodoDueDays(projects), getTodoStatuses(projects), http.get('/config/fields'),
+  const [limit, planLimit, reportLimit, password, days, statuses, cfg] = await Promise.all([
+    getIssueExportLimit(projects), getPlanExportLimit(projects), getReportExportLimit(projects),
+    getDefaultUserPassword(projects), getTodoDueDays(projects), getTodoStatuses(projects),
+    http.get('/config/fields'),
   ])
   exportLimit.value = limit
+  planExportLimit.value = planLimit
+  reportExportLimit.value = reportLimit
   defaultPassword.value = password
   todoDueDays.value = days
   todoStatuses.value = statuses
@@ -405,16 +414,22 @@ function checkSettingsTarget() {
   return true
 }
 
-async function saveIssueExportLimit() {
-  const value = Number(exportLimit.value)
+async function saveExportLimit(kind) {
+  const sources = {
+    issue: { value: exportLimit.value, save: putIssueExportLimit, label: '问题跟踪导出' },
+    plan: { value: planExportLimit.value, save: putPlanExportLimit, label: '项目计划导出' },
+    report: { value: reportExportLimit.value, save: putReportExportLimit, label: '报表导出' },
+  }
+  const source = sources[kind]
+  const value = Number(source.value)
   if (!Number.isInteger(value) || value < 0 || value > 100000) {
     return ElMessage.warning('导出上限须为 0~100000 的整数')
   }
   if (!checkSettingsTarget()) return
   settingsSaving.value = true
   try {
-    await putIssueExportLimit(value, settingsTargetProjects.value)
-    ElMessage.success(`${settingsScopeLabel.value}：${value === 0 ? '导出不限制行数' : `最多导出 ${value} 条`}`)
+    await source.save(value, settingsTargetProjects.value)
+    ElMessage.success(`${settingsScopeLabel.value}：${source.label}${value === 0 ? '不限制行数' : `最多 ${value} 条`}`)
     await loadSettings()
   } catch (e) {
     ElMessage.error(e.message)
@@ -422,6 +437,10 @@ async function saveIssueExportLimit() {
     settingsSaving.value = false
   }
 }
+
+const saveIssueExportLimit = () => saveExportLimit('issue')
+const savePlanExportLimit = () => saveExportLimit('plan')
+const saveReportExportLimit = () => saveExportLimit('report')
 
 async function saveDefaultPassword() {
   const value = String(defaultPassword.value || '').trim()
@@ -814,8 +833,6 @@ onBeforeUnmount(() => {
 
       <!-- ========== 系统设置 ========== -->
       <el-tab-pane v-if="canSettings" label="系统设置" name="settings">
-        <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
-          title="导出上限控制问题列表导出行数；默认密码用于人员档案自动下推生成的用户账号初始密码；待办规则控制待办清单的完成时间窗口与状态范围。" />
         <div class="toolbar">
           <el-select v-model="settingsProjectFilter" multiple collapse-tags clearable placeholder="按项目过滤设置" style="width:260px"
             @change="loadSettings">
@@ -826,54 +843,169 @@ onBeforeUnmount(() => {
             {{ settingsFieldsDisabled ? '请先选择具体项目后再编辑' : '非管理员只能维护有权限的具体项目' }}
           </span>
         </div>
-        <el-form label-width="140px" style="max-width: 560px">
-          <el-form-item label="导出记录上限">
-            <div style="display:flex; align-items:center; gap:12px; width:100%">
-              <el-input-number v-model="exportLimit" :min="0" :max="100000" :step="100"
-                :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
-              <span class="tip">0 = 不限制；最大 100000 条</span>
+        <el-tabs v-model="settingsSubTab" type="card" class="settings-sub-tabs">
+          <el-tab-pane label="项目计划" name="plan">
+            <el-form label-width="140px" style="max-width: 560px">
+              <el-form-item label="导出记录上限">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-input-number v-model="planExportLimit" :min="0" :max="100000" :step="100"
+                    :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
+                  <span class="tip">0 = 不限制；最大 100000 条</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="settingsSaving"
+                  @click="savePlanExportLimit">保存项目计划导出设置</el-button>
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="问题跟踪" name="issues">
+            <el-form label-width="140px" style="max-width: 560px">
+              <el-form-item label="导出记录上限">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-input-number v-model="exportLimit" :min="0" :max="100000" :step="100"
+                    :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
+                  <span class="tip">0 = 不限制；最大 100000 条</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="settingsSaving"
+                  @click="saveIssueExportLimit">保存问题跟踪导出设置</el-button>
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="报表" name="report">
+            <el-form label-width="140px" style="max-width: 560px">
+              <el-form-item label="导出记录上限">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-input-number v-model="reportExportLimit" :min="0" :max="100000" :step="100"
+                    :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
+                  <span class="tip">0 = 不限制；最大 100000 条</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="settingsSaving"
+                  @click="saveReportExportLimit">保存报表导出设置</el-button>
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="待办配置" name="todo">
+            <el-form label-width="140px" style="max-width: 560px">
+              <el-form-item label="待办完成时间">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-input-number v-model="todoDueDays" :min="0" :max="365" :step="1"
+                    :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
+                  <span class="tip">完成日期不晚于今天 + N 天（含逾期），0 = 仅今天及逾期</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="todoDaysSaving"
+                  @click="saveTodoDueDays">保存待办完成时间</el-button>
+              </el-form-item>
+              <el-form-item label="待办状态范围">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-select v-model="todoStatuses" multiple collapse-tags clearable filterable
+                    :disabled="settingsFieldsDisabled" placeholder="选择进入待办的状态" style="width: 220px">
+                    <el-option v-for="s in todoStatusOptions" :key="s" :value="s" :label="s" />
+                  </el-select>
+                  <span class="tip">仅所选状态的问题与计划进入待办清单</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="todoStatusesSaving"
+                  @click="saveTodoStatuses">保存待办状态</el-button>
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="通用" name="general">
+            <el-form label-width="140px" style="max-width: 560px">
+              <el-form-item label="默认用户密码">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-input v-model="defaultPassword" type="password" show-password style="width: 220px"
+                    :disabled="settingsFieldsDisabled" placeholder="至少 6 位" />
+                  <span class="tip">人员新增/修改后下推用户的初始密码</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="passwordSaving"
+                  @click="saveDefaultPassword">保存默认密码</el-button>
+              </el-form-item>
+              <el-form-item label="无操作自动下线（分钟）">
+                <div style="display:flex; align-items:center; gap:12px; width:100%">
+                  <el-input-number v-model="idleTimeout.minutes" :min="1" :max="10080"
+                    :disabled="idleConfigDisabled" controls-position="right" style="width: 220px" />
+                  <span class="tip">在线用户超过该时间无操作将自动下线</span>
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :disabled="idleConfigDisabled" :loading="idleSaving"
+                  @click="saveIdleSettings">保存自动下线配置</el-button>
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          <el-tab-pane v-if="canMonitor" label="用户监控" name="user-monitor">
+            <div class="toolbar">
+              <el-button :loading="monitorLoading" @click="loadMonitor">刷新</el-button>
+              <span class="tip">最后更新：{{ monitorUpdatedAt || '—' }}</span>
             </div>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="settingsSaving"
-              @click="saveIssueExportLimit">保存导出设置</el-button>
-          </el-form-item>
-          <el-form-item label="默认用户密码">
-            <div style="display:flex; align-items:center; gap:12px; width:100%">
-              <el-input v-model="defaultPassword" type="password" show-password style="width: 220px"
-                :disabled="settingsFieldsDisabled" placeholder="至少 6 位" />
-              <span class="tip">人员新增/修改后下推用户的初始密码</span>
+            <div class="status-counts">
+              <div class="status-count">
+                <div class="label">用户总数</div>
+                <div class="value">{{ monitor?.users?.total ?? 0 }}</div>
+              </div>
+              <div class="status-count">
+                <div class="label">启用</div>
+                <div class="value success">{{ monitor?.users?.enabled ?? 0 }}</div>
+              </div>
+              <div class="status-count">
+                <div class="label">停用</div>
+                <div class="value warning">{{ monitor?.users?.disabled ?? 0 }}</div>
+              </div>
+              <div class="status-count">
+                <div class="label">系统预置</div>
+                <div class="value">{{ monitor?.users?.preset ?? 0 }}</div>
+              </div>
+              <div class="status-count">
+                <div class="label">近 30 天新增</div>
+                <div class="value primary">{{ monitor?.users?.recent_30d ?? 0 }}</div>
+              </div>
+              <div class="status-count">
+                <div class="label">当前在线</div>
+                <div class="value primary">{{ monitor?.users?.online?.total ?? 0 }}</div>
+              </div>
             </div>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="passwordSaving"
-              @click="saveDefaultPassword">保存默认密码</el-button>
-          </el-form-item>
-          <el-form-item label="待办完成时间">
-            <div style="display:flex; align-items:center; gap:12px; width:100%">
-              <el-input-number v-model="todoDueDays" :min="0" :max="365" :step="1"
-                :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
-              <span class="tip">完成日期不晚于今天 + N 天（含逾期），0 = 仅今天及逾期</span>
-            </div>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="todoDaysSaving"
-              @click="saveTodoDueDays">保存待办完成时间</el-button>
-          </el-form-item>
-          <el-form-item label="待办状态范围">
-            <div style="display:flex; align-items:center; gap:12px; width:100%">
-              <el-select v-model="todoStatuses" multiple collapse-tags clearable filterable
-                :disabled="settingsFieldsDisabled" placeholder="选择进入待办的状态" style="width: 220px">
-                <el-option v-for="s in todoStatusOptions" :key="s" :value="s" :label="s" />
-              </el-select>
-              <span class="tip">仅所选状态的问题与计划进入待办清单</span>
-            </div>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="todoStatusesSaving"
-              @click="saveTodoStatuses">保存待办状态</el-button>
-          </el-form-item>
-        </el-form>
+
+            <div class="monitor-section-title">按项目在线分布</div>
+            <el-table :data="monitor?.users?.online?.by_project || []" size="small" border>
+              <el-table-column prop="project_code" label="项目编码" width="140" />
+              <el-table-column prop="project_name" label="项目名称" min-width="180" />
+              <el-table-column prop="count" label="在线用户数" width="120" />
+            </el-table>
+
+            <div class="monitor-section-title">在线用户明细（可强制下线）</div>
+            <el-table :data="monitor?.users?.online?.sessions || []" size="small" border max-height="320">
+              <el-table-column prop="username" label="登录账号" width="130" />
+              <el-table-column prop="person" label="姓名" width="110" />
+              <el-table-column prop="role" label="角色" width="120" />
+              <el-table-column prop="project_name" label="登录项目" min-width="160" />
+              <el-table-column label="登录时间" width="170">
+                <template #default="{ row }">{{ formatDateTime(row.login_at) }}</template>
+              </el-table-column>
+              <el-table-column label="在线时长" width="120">
+                <template #default="{ row }">{{ formatDuration(row.online_seconds) }}</template>
+              </el-table-column>
+              <el-table-column label="最后活跃" width="170">
+                <template #default="{ row }">{{ formatDateTime(row.last_seen_at) }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="100" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="danger" size="small" @click="kickSession(row)">强制下线</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-if="!monitor?.users?.online?.sessions?.length" description="当前没有在线用户" />
+          </el-tab-pane>
+        </el-tabs>
       </el-tab-pane>
 
       <!-- ========== 系统状态监控 ========== -->
@@ -958,18 +1090,6 @@ onBeforeUnmount(() => {
             <el-button type="primary" :loading="portSaving" @click="savePortSettings">保存连接配置</el-button>
           </div>
         </el-card>
-        <el-card shadow="never" header="在线会话配置" style="margin-bottom: 16px">
-          <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
-            title="在线用户超过配置时间没有任何操作将自动下线；同一用户不允许重复登录，再次登录需确认强制替换原会话。" />
-          <el-form inline @submit.prevent>
-            <el-form-item label="无操作自动下线（分钟）">
-              <el-input-number v-model="idleTimeout.minutes" :min="1" :max="10080" controls-position="right" style="width: 180px" />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :loading="idleSaving" @click="saveIdleSettings">保存自动下线配置</el-button>
-            </el-form-item>
-          </el-form>
-        </el-card>
         <el-row :gutter="16">
           <el-col :xs="24" :md="12">
             <el-card shadow="never" header="数据库监控">
@@ -1008,64 +1128,6 @@ onBeforeUnmount(() => {
             </el-card>
           </el-col>
         </el-row>
-        <el-card shadow="never" header="用户数登记监控" style="margin-top: 16px">
-          <div class="status-counts">
-            <div class="status-count">
-              <div class="label">用户总数</div>
-              <div class="value">{{ monitor?.users?.total ?? 0 }}</div>
-            </div>
-            <div class="status-count">
-              <div class="label">启用</div>
-              <div class="value success">{{ monitor?.users?.enabled ?? 0 }}</div>
-            </div>
-            <div class="status-count">
-              <div class="label">停用</div>
-              <div class="value warning">{{ monitor?.users?.disabled ?? 0 }}</div>
-            </div>
-            <div class="status-count">
-              <div class="label">系统预置</div>
-              <div class="value">{{ monitor?.users?.preset ?? 0 }}</div>
-            </div>
-            <div class="status-count">
-              <div class="label">近 30 天新增</div>
-              <div class="value primary">{{ monitor?.users?.recent_30d ?? 0 }}</div>
-            </div>
-            <div class="status-count">
-              <div class="label">当前在线</div>
-              <div class="value primary">{{ monitor?.users?.online?.total ?? 0 }}</div>
-            </div>
-          </div>
-
-          <div class="monitor-section-title">按项目在线分布</div>
-          <el-table :data="monitor?.users?.online?.by_project || []" size="small" border>
-            <el-table-column prop="project_code" label="项目编码" width="140" />
-            <el-table-column prop="project_name" label="项目名称" min-width="180" />
-            <el-table-column prop="count" label="在线用户数" width="120" />
-          </el-table>
-
-          <div class="monitor-section-title">在线用户明细（可强制下线）</div>
-          <el-table :data="monitor?.users?.online?.sessions || []" size="small" border max-height="320">
-            <el-table-column prop="username" label="登录账号" width="130" />
-            <el-table-column prop="person" label="姓名" width="110" />
-            <el-table-column prop="role" label="角色" width="120" />
-            <el-table-column prop="project_name" label="登录项目" min-width="160" />
-            <el-table-column label="登录时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.login_at) }}</template>
-            </el-table-column>
-            <el-table-column label="在线时长" width="120">
-              <template #default="{ row }">{{ formatDuration(row.online_seconds) }}</template>
-            </el-table-column>
-            <el-table-column label="最后活跃" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.last_seen_at) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="100" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="danger" size="small" @click="kickSession(row)">强制下线</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-if="!monitor?.users?.online?.sessions?.length" description="当前没有在线用户" />
-        </el-card>
       </el-tab-pane>
     </el-tabs>
     <el-empty v-if="!canSecurity && !canArchive && !canAlert && !canMonitor" description="当前账号暂无用户与权限相关操作权限" />
@@ -1178,6 +1240,7 @@ onBeforeUnmount(() => {
 .monitor-section-title { margin: 14px 0 8px; font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
 .config-group-title { margin-bottom: 12px; padding-left: 8px; border-left: 3px solid var(--el-color-primary); font-size: 13px; font-weight: 600; }
 .config-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--el-border-color-lighter); }
+.settings-sub-tabs { margin-top: 4px; }
 .matrix-wrap { overflow-x: auto; }
 .matrix { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 880px; }
 .matrix th, .matrix td { border: 1px solid var(--el-border-color-lighter); padding: 6px 8px; }

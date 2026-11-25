@@ -15,6 +15,13 @@ export const pivotRules = [
   query('pageSize').optional().isInt({ min: 1, max: 200 }).toInt(),
 ]
 
+export const loadMatrixRules = [
+  query('from').matches(/^\d{4}-\d{2}-\d{2}$/).withMessage('开始日期格式非法'),
+  query('to').matches(/^\d{4}-\d{2}-\d{2}$/).withMessage('结束日期格式非法'),
+  query('granularity').optional().isIn(['day', 'week', 'month']).withMessage('显示粒度非法'),
+  query('project').optional().isString(),
+]
+
 export const exportPivotBody = [
   body('filters').optional().isObject().withMessage('filters 非法'),
   body('charts').optional().isArray({ max: 5 }).withMessage('charts 非法'),

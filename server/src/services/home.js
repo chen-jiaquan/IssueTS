@@ -211,7 +211,7 @@ export async function listTodos(scope, profile = null) {
   const params = scope ? [scope] : []
   if (personScoped) params.push(profile.person)
   const { rows } = await pool.query(
-    `SELECT id, text, projects, owner, start_date, due, prio, type, done, created_at FROM todos
+    `SELECT id, text, projects, owner, start_date, due, completed_at, prio, type, done, created_at FROM todos
      WHERE ${scope ? `(cardinality(projects) = 0 OR projects && $1::text[])` : 'TRUE'}
        ${personScoped ? `AND (owner = $${params.length} OR owner IS NULL)` : ''}
      ORDER BY done, prio, due NULLS LAST, id`, params)
@@ -281,10 +281,15 @@ export async function listAggregatedTodos(scope, filters = {}, profile = null) {
         AND ($2::text IS NULL OR t.owner = $2)
         AND ($4::text IS NULL OR cardinality(t.projects) = 0 OR $4 = ANY(t.projects))
         AND ($5::text IS NULL OR t.owner = $5 OR t.owner IS NULL)
-        AND t.done = false
-        AND COALESCE(t.due, t.start_date) IS NOT NULL
-        AND COALESCE(t.due, t.start_date) <= CURRENT_DATE + cfg.days
-        AND (CASE WHEN t.done THEN '关闭' ELSE '未开始' END) = ANY (SELECT jsonb_array_elements_text(cfg.statuses))
+        AND (
+          (
+            t.done = false
+            AND COALESCE(t.due, t.start_date) IS NOT NULL
+            AND COALESCE(t.due, t.start_date) <= CURRENT_DATE + cfg.days
+            AND '未开始' = ANY (SELECT jsonb_array_elements_text(cfg.statuses))
+          )
+          OR (t.done = true AND t.type = '手工')
+        )
     )
     SELECT * FROM agg
     WHERE ($3::text IS NULL OR type = $3)
@@ -295,20 +300,28 @@ export async function listAggregatedTodos(scope, filters = {}, profile = null) {
 
 export async function createTodo(body) {
   const id = await nextId('todos', 't')
+  const done = !!body.done
   const { rows } = await pool.query(
-    'INSERT INTO todos(id, text, projects, owner, start_date, due, prio, type, done) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
+    `INSERT INTO todos(id, text, projects, owner, start_date, due, completed_at, prio, type, done)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
     [id, body.text, strArray(body.projects), body.owner || null, body.start_date || null,
-      body.due || null, body.prio || 'M', body.type || '手工', !!body.done])
+      body.due || null, done ? ymd(new Date()) : null, body.prio || 'M', body.type || '手工', done])
   return rows[0]
 }
 
 export async function updateTodo(id, body) {
+  const current = await pool.query('SELECT done, completed_at FROM todos WHERE id=$1', [id])
+  if (!current.rows[0]) throw new HttpError(404, ERR.NOT_FOUND, `待办 ${id} 不存在`)
+  const done = body.done === undefined ? current.rows[0].done : !!body.done
+  const completedAt = done
+    ? (current.rows[0].completed_at || ymd(new Date()))
+    : null
   const { rows } = await pool.query(
     `UPDATE todos SET text=$2, projects=COALESCE($3::text[], projects), owner=$4,
-       start_date=$5, due=$6, prio=$7, type=$8, done=$9 WHERE id=$1 RETURNING *`,
+       start_date=$5, due=$6, completed_at=$7, prio=$8, type=$9, done=$10 WHERE id=$1 RETURNING *`,
     [id, body.text, body.projects === undefined ? null : strArray(body.projects),
-      body.owner ?? null, body.start_date ?? null, body.due ?? null, body.prio ?? 'M',
-      body.type || '手工', !!body.done])
+      body.owner ?? null, body.start_date ?? null, body.due ?? null, completedAt,
+      body.prio ?? 'M', body.type || '手工', done])
   if (!rows[0]) throw new HttpError(404, ERR.NOT_FOUND, `待办 ${id} 不存在`)
   return rows[0]
 }

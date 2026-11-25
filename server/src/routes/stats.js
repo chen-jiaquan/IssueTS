@@ -5,8 +5,8 @@ import { validate } from '../middleware/validate.js'
 import { authRequired, loadProfile } from '../middleware/auth.js'
 import { hasPerm } from '../middleware/rbac.js'
 import { attachScope } from '../middleware/scope.js'
-import { pivotRules, exportPivotBody } from '../schemas/stats.js'
-import { pivot, exportPivot } from '../services/stats.js'
+import { pivotRules, exportPivotBody, loadMatrixRules } from '../schemas/stats.js'
+import { pivot, exportPivot, loadMatrix } from '../services/stats.js'
 import { ok } from '../utils/resp.js'
 
 const router = Router()
@@ -14,6 +14,9 @@ router.use(authRequired, loadProfile)
 
 router.get('/pivot', hasPerm('ISSUE_VIEW'), pivotRules, validate, attachScope,
   asyncHandler(async (req, res) => ok(res, await pivot(req.query, req.scope))))
+
+router.get('/load-matrix', hasPerm('ISSUE_VIEW'), loadMatrixRules, validate, attachScope,
+  asyncHandler(async (req, res) => ok(res, await loadMatrix(req.query, req.scope))))
 
 router.post('/export', hasPerm('DATA_EXPORT'), exportPivotBody, validate, attachScope,
   asyncHandler(async (req, res) => {

@@ -1,7 +1,7 @@
 <script setup>
 // 基础档案设置：项目/产品/人员/字典/自定义字段/必填/通知类型/待办优先级 编辑
 // 权限：按界面二级菜单（页签）细化。
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '@/components/BackHome.vue'
 import { useAuthStore } from '@/store/auth'
@@ -55,8 +55,13 @@ const dictProjectFilter = ref([]) // 字典项按归属项目过滤（多选）�
 const personnelProjectFilter = ref([]) // 人员档案按所属项目过滤（多选）：空=全部，选中=含 ALL 或任一所选项目的人员
 const archiveProjectFilter = ref([]) // 产品/自定义字段/通知类型/待办优先级的项目过滤（多选）
 const customFields = ref([])
-const requiredFieldRules = ref([]) // [{ field_key, projects }]，projects 空数组=全局必填
-const fieldOptions = ref([]) // 问题字段清单（供必填勾选）
+const reqModule = ref('issue') // issue=问题跟踪，plan=项目计划
+const requiredRulesByModule = reactive({ issue: [], plan: [] })
+const requiredFieldRules = computed(() => requiredRulesByModule[reqModule.value]) // [{ field_key, projects }]
+const issueFieldOptions = ref([])
+const planFieldOptions = ref([])
+const fixedFieldDefs = ref([])
+const fieldOptions = computed(() => reqModule.value === 'plan' ? planFieldOptions.value : issueFieldOptions.value)
 const noticeTypes = ref([])
 const todoPrios = ref([])
 
@@ -68,6 +73,21 @@ const DICT_KEYS = [
 const dictLabel = (k) => DICT_KEYS.find((d) => d.key === k)?.label ?? k
 const projectLabel = (code) => (code === 'ALL' ? '全部项目' : (projects.value.find((p) => p.code === code)?.name ?? code))
 const roleLabel = (code, row) => row?.role_name || roles.value.find((r) => r.code === code)?.name || code
+// 项目计划固定字段（供“项目计划必填字段”勾选）
+const PLAN_FIELD_OPTIONS = [
+  { key: 'project', label: '项目' }, { key: 'title', label: '任务名称' },
+  { key: 'category', label: '分类' }, { key: 'seq_no', label: '序号' },
+  { key: 'owner', label: '负责人' }, { key: 'assistant1', label: '配合人1' },
+  { key: 'assistant2', label: '配合人2' },
+  { key: 'start_date', label: '开始时间' }, { key: 'end_date', label: '完成时间' },
+  { key: 'actual_start_date', label: '实际开始' }, { key: 'actual_end_date', label: '实际完成' },
+  { key: 'hours', label: '工时' }, { key: 'man_days', label: '人天' },
+  { key: 'day_rate', label: '人天单价' },
+  { key: 'planned_amount', label: '计划金额' }, { key: 'actual_amount', label: '实际金额' },
+  { key: 'adjusted_hours', label: '调整工时' }, { key: 'status', label: '状态' },
+  { key: 'note', label: '备注' }, { key: 'predecessor', label: '前置任务' },
+  { key: 'track', label: '跟踪记录' },
+]
 // 当前用户可见的项目（前端按 scope 收敛，与后端 /archives/projects 过滤一致）
 const visibleProjects = () => projects.value.filter((p) => p.enabled !== false && (!auth.scope || auth.scope.includes(p.code)))
 // 项目多选选项（供各档案表单）；用户仅能选自己有权限的项目
@@ -95,14 +115,27 @@ const filterByArchiveProject = (rows) => {
     && (r.projects.includes('ALL') || r.projects.some((c) => selected.includes(c))))
 }
 
+// 固定字段 + 启用且属于该模块的自定义字段都可配置为必填；排除虚拟字段
+function rebuildFieldOptions(custom = customFields.value) {
+  issueFieldOptions.value = [...fixedFieldDefs.value,
+    ...custom.filter((f) => f.module !== 'plan').map((f) => ({ ...f, custom: true }))]
+    .filter((f) => !['track', 'custom_fields', 'image_url'].includes(f.key))
+  planFieldOptions.value = [...PLAN_FIELD_OPTIONS,
+    ...custom.filter((f) => f.module === 'plan').map((f) => ({ ...f, custom: true }))]
+}
+watch(customFields, (list) => rebuildFieldOptions(list), { deep: true })
+
 async function loadAll() {
   loading.value = true
   try {
-    const [cfg, req] = await Promise.all([http.get('/config/fields', { params: { scope: 1 } }), A.getRequiredFieldRules()])
-    // 固定字段 + 启用的自定义字段都可配置为必填；排除虚拟字段
-    fieldOptions.value = [...cfg.fields, ...(cfg.customFields || []).map((f) => ({ ...f, custom: true }))]
-      .filter((f) => !['track', 'custom_fields', 'image_url'].includes(f.key))
-    requiredFieldRules.value = req
+    const [cfg, issueRules, planRules] = await Promise.all([
+      http.get('/config/fields', { params: { scope: 1 } }),
+      A.getRequiredFieldRules('issue'),
+      A.getRequiredFieldRules('plan'),
+    ])
+    fixedFieldDefs.value = cfg.fields || []
+    requiredRulesByModule.issue = issueRules
+    requiredRulesByModule.plan = planRules
     // 登录即可读的档案
     const done = await Promise.all([
       A.listProjects(true), A.listProducts(), A.listPersonnel(), A.listDictItems(),
@@ -110,6 +143,7 @@ async function loadAll() {
     ])
     ;[projects.value, products.value, personnel.value, dictItems.value,
       customFields.value, noticeTypes.value, todoPrios.value] = done
+    rebuildFieldOptions(customFields.value)
     if (canWrite.value) roles.value = await A.listRoles()
   } catch (e) {
     ElMessage.error(e.message)
@@ -314,11 +348,15 @@ const projectCfg = computed(() => ({
     { key: 'applicant', label: '申请人', width: 110 },
     { key: 'applied_at', label: '申请时间', width: 165,
       render: (row) => ({ text: formatLocalTime(row.applied_at) }) },
-    { key: 'note', label: '备注' }, colorCell('color'), enabledCol, presetCol,
+    { key: 'note', label: '备注' },
+    { key: 'contract_man_days', label: '合同人天', width: 110,
+      render: (row) => ({ text: Number(row.contract_man_days || 0).toFixed(2) }) },
+    colorCell('color'), enabledCol, presetCol,
   ],
   form: [
     { key: 'code', label: '编码', required: true, disabledOnEdit: true },
     { key: 'name', label: '名称' }, { key: 'note', label: '备注', type: 'textarea' },
+    { key: 'contract_man_days', label: '合同人天', type: 'number', precision: 2, default: 0 },
     { key: 'color', label: '颜色', type: 'color' }, enabledForm, presetForm,
   ],
   api: { create: A.createProject, update: (row, d) => A.updateProject(row.code, d), del: (row) => A.deleteProject(row.code) },
@@ -353,6 +391,8 @@ const personnelCfg = computed(() => ({
     { key: 'role', label: '岗位', width: 130, render: (row) => ({ text: roleLabel(row.role, row) }) }, { key: 'group', label: '所属组' },
     { key: 'projects', label: '所属项目', minWidth: 200,
       render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
+    { key: 'day_rate', label: '个人天单价', width: 120,
+      render: (row) => ({ text: Number(row.day_rate || 0).toFixed(2) }) },
     { key: 'status', label: '注册状态', width: 110, render: (row) => statusTag(row.status) },
     { key: 'applied_at', label: '申请时间', width: 165,
       render: (row) => ({ text: formatLocalTime(row.applied_at) }) },
@@ -375,6 +415,7 @@ const personnelCfg = computed(() => ({
         return opts
       } },
     { key: 'group', label: '所属组' },
+    { key: 'day_rate', label: '个人天单价', type: 'number', precision: 2, default: 0 },
     { key: 'projects', label: '所属项目', type: 'select', multiple: true, default: [], options: projectMultiOptions },
     enabledForm, presetForm,
   ],
@@ -417,6 +458,8 @@ const customCfg = computed(() => ({
   rows: filterByArchiveProject(customFields.value), reload: async () => { customFields.value = await A.listCustomFields() },
   cols: [
     { key: 'key', label: '字段键', width: 130 }, { key: 'label', label: '列名', width: 180 },
+    { key: 'module', label: '所属类型', width: 110,
+      render: (row) => ({ text: row.module === 'plan' ? '项目计划' : '问题跟踪' }) },
     { key: 'type', label: '类型', width: 120, render: (row) => ({ text: { text: '单行', textarea: '多行', number: '数字', date: '日期' }[row.type] }) },
     { key: 'projects', label: '所属项目', minWidth: 180, render: (row) => ({ text: (row.projects || []).map(projectLabel).join('、') || '—' }) },
     enabledCol, presetCol,
@@ -425,6 +468,8 @@ const customCfg = computed(() => ({
     { key: 'key', label: '字段键', required: true, disabled: true,
       default: `cf_${Math.max(0, ...customFields.value.map((f) => Number(String(f.key).match(/^cf_(\d+)$/)?.[1] || 0))) + 1}` },
     { key: 'label', label: '列名', required: true },
+    { key: 'module', label: '所属类型', type: 'select', required: true, default: 'issue',
+      options: [{ key: 'issue', label: '问题跟踪' }, { key: 'plan', label: '项目计划' }] },
     { key: 'type', label: '类型', type: 'select', required: true, default: 'text',
       options: [{ key: 'text', label: '单行' }, { key: 'textarea', label: '多行' }, { key: 'number', label: '数字' }, { key: 'date', label: '日期' }] },
     projectsFormField, enabledForm, presetForm,
@@ -559,7 +604,7 @@ const requiredReadOnlyTip = (key) => {
 const canSaveRequired = () => canWriteTab('required') && (!!requiredProjectFilter.value || auth.scope === null)
 async function onRequiredFilterChange() {
   try {
-    requiredFieldRules.value = await A.getRequiredFieldRules()
+    requiredRulesByModule[reqModule.value] = await A.getRequiredFieldRules(reqModule.value)
     reqDirty.value = false
   } catch (e) {
     ElMessage.error(e.message)
@@ -568,20 +613,23 @@ async function onRequiredFilterChange() {
 function toggleRequired(key, checked) {
   if (requiredRuleReadOnly(key)) return
   const project = requiredProjectFilter.value
+  const rules = requiredFieldRules.value
   if (project) {
-    let rule = ruleOf(key)
+    const rule = ruleOf(key)
     if (checked) {
-      if (!rule) requiredFieldRules.value.push({ field_key: key, projects: [project] })
+      if (!rule) rules.push({ field_key: key, projects: [project] })
       else if (!rule.projects.includes(project)) rule.projects.push(project)
     } else {
       if (!rule || isGlobalRuleObj(rule)) return
       rule.projects = rule.projects.filter((p) => p !== project)
-      if (!rule.projects.length) requiredFieldRules.value = requiredFieldRules.value.filter((r) => r.field_key !== key)
+      if (!rule.projects.length) {
+        requiredRulesByModule[reqModule.value] = rules.filter((r) => r.field_key !== key)
+      }
     }
   } else if (checked) {
-    if (!ruleOf(key)) requiredFieldRules.value.push({ field_key: key, projects: [] })
+    if (!ruleOf(key)) rules.push({ field_key: key, projects: [] })
   } else {
-    requiredFieldRules.value = requiredFieldRules.value.filter((r) => r.field_key !== key)
+    requiredRulesByModule[reqModule.value] = rules.filter((r) => r.field_key !== key)
   }
   reqDirty.value = true
 }
@@ -592,9 +640,9 @@ async function saveRequired() {
       const payload = requiredFieldRules.value
         .filter((r) => (r.projects || []).includes(project) && !isGlobalRuleObj(r))
         .map((r) => ({ field_key: r.field_key, projects: [project] }))
-      await A.putRequiredFields(payload, project)
+      await A.putRequiredFields(payload, project, reqModule.value)
     } else {
-      await A.putRequiredFields(requiredFieldRules.value.filter((r) => isGlobalRuleObj(r)))
+      await A.putRequiredFields(requiredFieldRules.value.filter((r) => isGlobalRuleObj(r)), null, reqModule.value)
     }
     ElMessage.success('必填字段配置已保存')
     reqDirty.value = false
@@ -615,8 +663,22 @@ const REQ_GROUPS = [
     keys: ['reported_at', 'plan_start', 'plan_end', 'resolved_at', 'customer_test_done'] },
   { label: '方案说明', desc: '开发方案等文本', color: '#f56c6c', keys: ['solution'] },
 ]
+const PLAN_REQ_GROUPS = [
+  { label: '基础信息', desc: '项目、任务名称、分类、序号', color: '#409eff',
+    keys: ['project', 'title', 'category', 'seq_no'] },
+  { label: '人员与协作', desc: '负责人、配合人', color: '#67c23a',
+    keys: ['owner', 'assistant1', 'assistant2'] },
+  { label: '时间与进度', desc: '计划/实际时间、工时、状态', color: '#e6a23c',
+    keys: ['start_date', 'end_date', 'actual_start_date', 'actual_end_date',
+      'hours', 'man_days', 'adjusted_hours', 'status'] },
+  { label: '金额', desc: '人天单价、计划金额与实际金额', color: '#9b59b6',
+    keys: ['day_rate', 'planned_amount', 'actual_amount'] },
+  { label: '其他', desc: '备注、前置任务、跟踪记录', color: '#f56c6c',
+    keys: ['note', 'predecessor', 'track'] },
+]
 const groupedFieldOptions = computed(() => {
-  const groups = REQ_GROUPS.map((g) => ({ ...g, fields: [] }))
+  const groups = (reqModule.value === 'plan' ? PLAN_REQ_GROUPS : REQ_GROUPS)
+    .map((g) => ({ ...g, fields: [] }))
   const custom = { label: '自定义字段', desc: '档案中扩展的字段', color: '#1abc9c', fields: [] }
   const other = { label: '其他字段', desc: '', color: '#909399', fields: [] }
   for (const f of fieldOptions.value) {
@@ -630,6 +692,7 @@ const groupedFieldOptions = computed(() => {
 const requiredCountIn = (group) => group.fields.filter((f) => isRequiredForFilter(f.key)).length
 const requiredCountTotal = computed(() =>
   groupedFieldOptions.value.reduce((n, g) => n + requiredCountIn(g), 0))
+watch(reqModule, () => { reqDirty.value = false })
 </script>
 
 <template>
@@ -701,6 +764,10 @@ const requiredCountTotal = computed(() =>
 
       <!-- 必填字段 -->
       <el-tab-pane v-if="visibleTabKeys.includes('required')" label="必填字段" name="required">
+        <el-tabs v-model="reqModule" size="small" style="margin-bottom:10px">
+          <el-tab-pane label="问题跟踪" name="issue" />
+          <el-tab-pane label="项目计划" name="plan" />
+        </el-tabs>
         <div class="toolbar">
           <el-select v-model="requiredProjectFilter" clearable placeholder="全局配置（所有项目）" style="width:220px"
             @change="onRequiredFilterChange">
@@ -744,7 +811,8 @@ const requiredCountTotal = computed(() =>
             :required="PROJECT_FIELD_KEYS.includes(f.key) ? requireArchiveProject() : (f.required && (!editing || f.requiredOnEdit))">
             <el-color-picker v-if="f.type === 'color'" v-model="form[f.key]" />
             <el-switch v-else-if="f.type === 'switch'" v-model="form[f.key]" />
-            <el-input-number v-else-if="f.type === 'number'" v-model="form[f.key]" style="width:100%" />
+            <el-input-number v-else-if="f.type === 'number'" v-model="form[f.key]" style="width:100%"
+              :min="0" :precision="f.precision" :step="f.precision ? 0.5 : 1" />
             <el-select v-else-if="f.type === 'select'" v-model="form[f.key]" style="width:100%" :multiple="!!f.multiple"
               :collapse-tags="!!f.multiple" :disabled="f.disabledOnEdit && !!editing">
               <el-option v-for="o in (typeof f.options === 'function' ? f.options() : f.options)" :key="o.key" :value="o.key" :label="o.label" />

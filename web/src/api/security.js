@@ -23,6 +23,12 @@ export const putRolePerms = (roleCode, permCodes) =>
 export const getIssueExportLimit = (project) => http.get('/config/settings/issue-export-limit', projectParams(project))
 export const putIssueExportLimit = (value, projects) =>
   http.put('/config/settings/issue-export-limit', { value, projects })
+export const getPlanExportLimit = (project) => http.get('/config/settings/plan-export-limit', projectParams(project))
+export const putPlanExportLimit = (value, projects) =>
+  http.put('/config/settings/plan-export-limit', { value, projects })
+export const getReportExportLimit = (project) => http.get('/config/settings/report-export-limit', projectParams(project))
+export const putReportExportLimit = (value, projects) =>
+  http.put('/config/settings/report-export-limit', { value, projects })
 export const getDefaultUserPassword = (project) => http.get('/config/settings/default-user-password', projectParams(project))
 export const putDefaultUserPassword = (value, projects) =>
   http.put('/config/settings/default-user-password', { value, projects })

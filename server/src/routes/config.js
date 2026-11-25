@@ -13,6 +13,7 @@ import {
 import {
   getIssueExportLimit, setIssueExportLimit, getDefaultUserPassword, setDefaultUserPassword,
   getTodoDueDays, setTodoDueDays, getTodoStatuses, setTodoStatuses,
+  getPlanExportLimit, setPlanExportLimit, getReportExportLimit, setReportExportLimit,
 } from '../services/settings.js'
 
 const router = Router()
@@ -73,6 +74,22 @@ router.put('/settings/issue-export-limit', loadProfile, attachScope, hasPerm(SET
   asyncHandler(async (req, res) => ok(res,
     await setIssueExportLimit(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
 
+// 系统设置：项目计划导出上限，0=不限制
+router.get('/settings/plan-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  asyncHandler(async (req, res) => ok(res, await getPlanExportLimit(req.query.project, req.scope, req))))
+router.put('/settings/plan-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  issueExportLimitRules, validate,
+  asyncHandler(async (req, res) => ok(res,
+    await setPlanExportLimit(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
+
+// 系统设置：报表导出上限，0=不限制
+router.get('/settings/report-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  asyncHandler(async (req, res) => ok(res, await getReportExportLimit(req.query.project, req.scope, req))))
+router.put('/settings/report-export-limit', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  issueExportLimitRules, validate,
+  asyncHandler(async (req, res) => ok(res,
+    await setReportExportLimit(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
+
 // 系统设置：人员下推用户时的初始密码
 router.get('/settings/default-user-password', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
   asyncHandler(async (req, res) => ok(res, await getDefaultUserPassword(req.query.project, req.scope, req))))
@@ -121,7 +138,7 @@ router.get('/fields', loadProfile, attachScope, asyncHandler(async (req, res) =>
     `SELECT code, note, color, projects FROM products WHERE enabled = true ${overlapCond('projects')}
      ORDER BY code`, sp)
   const customFields = await pool.query(
-    `SELECT key, label, type, projects FROM custom_fields WHERE enabled = true ${overlapCond('projects')}
+    `SELECT key, label, type, module, projects FROM custom_fields WHERE enabled = true ${overlapCond('projects')}
      ORDER BY key`, sp)
   const noticeTypes = await pool.query(
     `SELECT id, name, projects FROM notice_types WHERE enabled = true ${overlapCond('projects')}

@@ -3,6 +3,7 @@
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Warning, WarningFilled } from '@element-plus/icons-vue'
 import BackHome from '@/components/BackHome.vue'
 import TrackRecords from '@/components/TrackRecords.vue'
 import { useAuthStore } from '@/store/auth'
@@ -21,11 +22,15 @@ const projectMeta = ref([])
 const statusOptions = ref([])
 const personnelMeta = ref([])
 const personKeys = ['owner', 'assistant1', 'assistant2']
+const multiPersonKeys = ['assistant1', 'assistant2']
 const personOptions = computed(() => [...new Set((personnelMeta.value || []).map((p) => p.name).filter(Boolean))])
+const personList = (v) => [...new Set(
+  (Array.isArray(v) ? v : String(v || '').split(/[,，、]/)).map((s) => String(s || '').trim()).filter(Boolean),
+)]
+const personJoin = (v) => personList(v).join(',')
+const personLabel = (v) => personList(v).join('、') || '—'
 function personOptionsWith(value) {
-  const name = String(value || '').trim()
-  if (!name) return personOptions.value
-  return personOptions.value.includes(name) ? personOptions.value : [name, ...personOptions.value]
+  return [...new Set([...personList(value), ...personOptions.value])]
 }
 const plans = ref([])
 const rows = ref([])
@@ -37,8 +42,17 @@ const ganttScroll = ref(null)
 const planGrid = ref(null)
 const gridHeight = ref(520)
 const leftPaneWidth = ref(760)
-const ganttVisible = ref(true)
-watch(ganttVisible, () => nextTick(relayoutTable))
+const ganttVisible = ref(false)
+const tableVisible = ref(true)
+watch([ganttVisible, tableVisible], () => nextTick(relayoutTable))
+function toggleGantt() {
+  ganttVisible.value = !ganttVisible.value
+  if (!ganttVisible.value && !tableVisible.value) tableVisible.value = true
+}
+function toggleTable() {
+  tableVisible.value = !tableVisible.value
+  if (!tableVisible.value) ganttVisible.value = true
+}
 // 参考问题跟踪：'' 不锁定 / 'header' 仅锁定表头 / 'both' 表头+前 3 个数据列固定（偏好存本地）
 const lockMode = ref(localStorage.getItem('plan_lock_mode') ?? 'both')
 const leftFixed = computed(() => (lockMode.value === 'both' ? 'left' : undefined))
@@ -51,6 +65,8 @@ function setPlanLockMode(val) {
 const dragging = ref(false)
 const loading = ref(false)
 const saving = ref(false)
+const planCustomFields = ref([]) // 所属类型为“项目计划”的自定义字段
+const planRequired = ref([]) // 项目计划必填字段（问题跟踪/项目计划分别配置）
 // 列配置：顺序/显隐/筛选/排序统一由此驱动
 const COL_DEFS = [
   { key: 'project_name', label: '项目名称', width: 130, field: 'project_name' },
@@ -67,7 +83,9 @@ const COL_DEFS = [
   { key: 'predecessor', label: '前置任务', width: 180, field: 'predecessor' },
   { key: 'actual_start_date', label: '实际开始', width: 130, field: 'actual_start_date' },
   { key: 'actual_end_date', label: '实际完成', width: 130, field: 'actual_end_date' },
-  { key: 'completion_rate', label: '完成比例', width: 110, field: 'completion_rate' },
+  { key: 'actual_hours', label: '实际工时', width: 100, field: 'actual_hours' },
+  { key: 'adjusted_hours', label: '调整工时', width: 100, field: 'adjusted_hours' },
+  { key: 'completion_rate', label: '完成比例', width: 120, field: 'completion_rate' },
   { key: 'status', label: '状态', width: 106, field: 'status' },
   { key: 'note', label: '备注', minWidth: 160, field: 'note' },
   { key: 'track', label: '跟踪记录', width: 180, field: 'track' },
@@ -76,8 +94,19 @@ const COL_DEFS = [
   { key: 'project', label: '项目', width: 130, field: 'project' },
   { key: 'hours', label: '工时', width: 90, field: 'hours' },
   { key: 'man_days', label: '人天', width: 90, field: 'man_days' },
+  { key: 'day_rate', label: '人天单价', width: 110, field: 'day_rate' },
+  { key: 'planned_amount', label: '计划金额', width: 120, field: 'planned_amount' },
+  { key: 'actual_amount', label: '实际金额', width: 120, field: 'actual_amount' },
 ]
-const columns = ref(COL_DEFS.map((c) => ({ ...c, visible: !['project', 'hours', 'man_days'].includes(c.key) })))
+const HIDDEN_COLUMNS = ['project', 'hours', 'man_days', 'day_rate', 'planned_amount', 'actual_amount']
+const allColumnDefs = () => [
+  ...COL_DEFS.filter((c) => c.key !== 'logs'),
+  ...planCustomFields.value.map((f) => ({
+    key: f.key, label: f.label, width: 140, field: f.key, custom: true,
+  })),
+  ...COL_DEFS.filter((c) => c.key === 'logs'),
+]
+const columns = ref(allColumnDefs().map((c) => ({ ...c, visible: !HIDDEN_COLUMNS.includes(c.key) })))
 // 列顺序按用户隔离存本地：拖拽只影响本人，换账号不会串顺序；“恢复默认排序”回到系统预置顺序
 const columnOrderKey = computed(() => `plan_column_order:${auth.user?.id || 'anon'}`)
 const columnOrder = ref([])
@@ -97,17 +126,26 @@ function applyColumnOrder() {
 function loadUserColumnOrder() {
   columnOrder.value = readColumnOrder()
   const visible = new Map(columns.value.map((c) => [c.key, c.visible]))
-  columns.value = COL_DEFS.map((c) => ({ ...c, visible: visible.get(c.key) ?? c.visible }))
+  columns.value = allColumnDefs().map((c) => ({ ...c, visible: visible.get(c.key) ?? c.visible }))
   applyColumnOrder()
   nextTick(bindColumnDrag)
 }
 function resetColumnOrder() {
   const visible = new Map(columns.value.map((c) => [c.key, c.visible]))
-  columns.value = COL_DEFS.map((c) => ({ ...c, visible: visible.get(c.key) ?? c.visible }))
+  columns.value = allColumnDefs().map((c) => ({ ...c, visible: visible.get(c.key) ?? c.visible }))
   saveColumnOrder([])
   localStorage.removeItem(columnOrderKey.value)
   nextTick(bindColumnDrag)
   ElMessage.success('列顺序已恢复默认')
+}
+function applyPlanCustomFields(list) {
+  planCustomFields.value = list || []
+  const visible = new Map(columns.value.map((c) => [c.key, c.visible]))
+  columns.value = allColumnDefs().map((c) => ({
+    ...c, visible: visible.get(c.key) ?? (c.custom ? true : !HIDDEN_COLUMNS.includes(c.key)),
+  }))
+  applyColumnOrder()
+  nextTick(bindColumnDrag)
 }
 loadUserColumnOrder()
 watch(() => auth.user?.id, loadUserColumnOrder)
@@ -132,18 +170,38 @@ function fieldValue(row, key) {
     case 'track': return lastTrack(row)?.date || ''
     case 'duration': return `${row.duration || 0} 个工作日`
     case 'logs': return `日志${row.logs_count || 0}`
-    default: return row[key] ?? ''
+    default: {
+      const custom = row.custom_fields
+      if (custom && Object.prototype.hasOwnProperty.call(custom, key)) return custom[key]
+      return row[key] ?? ''
+    }
   }
 }
+const customFieldDef = (key) => planCustomFields.value.find((f) => f.key === key)
+const customValue = (row, key) => (row?.custom_fields && Object.prototype.hasOwnProperty.call(row.custom_fields, key)
+  ? row.custom_fields[key] : '')
+function ensureCustomFields(row) {
+  if (!row.custom_fields || typeof row.custom_fields !== 'object' || Array.isArray(row.custom_fields)) {
+    row.custom_fields = { ...(row.custom_fields || {}) }
+  }
+}
+const planFieldLabel = (key) => columns.value.find((c) => c.key === key)?.label
+  || customFieldDef(key)?.label || key
+const EMPTY_FILTER_VALUE = '__EMPTY__'
+const isBlankFilterValue = (v) => v === null || v === undefined || v === '' || v === '—'
 const columnFilters = computed(() => {
   const out = {}
   for (const col of columns.value) {
     const set = new Set()
+    let hasBlank = false
     for (const row of rows.value) {
       const v = fieldValue(row, col.field)
-      if (v) set.add(String(v))
+      if (isBlankFilterValue(v)) hasBlank = true
+      else set.add(String(v))
     }
-    out[col.key] = [...set].slice(0, 200).sort().map((v) => ({ text: v, value: v }))
+    const items = [...set].slice(0, 200).sort().map((v) => ({ text: v, value: v }))
+    if (hasBlank) items.push({ text: '（空）', value: EMPTY_FILTER_VALUE })
+    out[col.key] = items
   }
   return out
 })
@@ -165,10 +223,13 @@ function rowMatchesFilters(row) {
     if (!Array.isArray(values) || !values.length) continue
     const col = columns.value.find((c) => c.key === key)
     if (!col) continue
-    const cell = String(fieldValue(row, col.field)).toLowerCase()
+    const raw = fieldValue(row, col.field)
     if (key === 'title') {
+      const cell = String(raw ?? '').toLowerCase()
       if (!values.some((v) => cell.includes(String(v).toLowerCase()))) return false
-    } else if (!values.some((v) => cell === String(v))) return false
+    } else if (!values.some((v) => (
+      v === EMPTY_FILTER_VALUE ? isBlankFilterValue(raw) : String(raw ?? '') === String(v)
+    ))) return false
   }
   return true
 }
@@ -301,9 +362,10 @@ const editing = ref(null)
 const tmpSeq = ref(1)
 const form = reactive({
   project: '', parent_id: '', seq_no: '', parentReady: true, title: '', category: '', status: '未开始',
-  owner: '', assistant1: '', assistant2: '',
+  owner: '', assistant1: [], assistant2: [],
   start_date: '', end_date: '', actual_start_date: '', actual_end_date: '', completion_rate: 0,
-  hours: 0, man_days: 0, sort: 0, note: '', predecessor: [], track: [],
+  adjusted_hours: 0, hours: 0, man_days: 0, day_rate: 0, planned_amount: 0, actual_amount: 0,
+  sort: 0, note: '', predecessor: [], track: [], custom_fields: {},
 })
 const logDialog = ref(false)
 const logList = ref([])
@@ -339,6 +401,12 @@ const statusTagStyle = (v) => {
   return color && /^#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/.test(color)
     ? { backgroundColor: color, borderColor: color, color: '#fff' } : {}
 }
+function syncStatusByActual(row) {
+  if (row.actual_end_date) row.status = '已解决'
+  else if (row.actual_start_date) row.status = '进行中'
+  else row.status = '未开始'
+}
+watch(() => [form.actual_start_date, form.actual_end_date], () => syncStatusByActual(form))
 const rowById = computed(() => Object.fromEntries(rows.value.map((r) => [r.id, r])))
 const NAME_SEP = ' / '
 const PARENT_SEP = '｜'
@@ -415,10 +483,20 @@ const isEmptyDraft = (r) => !!r._new && !hasTaskName(r) && !r.category && !r.own
 const emptyDraftCount = computed(() => rows.value.filter(isEmptyDraft).length)
 const rolledUp = computed(() => !!editing.value?.has_children)
 const autoCalc = computed(() => !!(form.start_date && form.end_date))
-const totalHours = computed(() => plans.value.filter((p) => !p.parent_id)
-  .reduce((sum, p) => sum + Number(p.hours || 0), 0))
-const totalManDays = computed(() => plans.value.filter((p) => !p.parent_id)
-  .reduce((sum, p) => sum + Number(p.man_days || 0), 0))
+const leafPlans = computed(() => plans.value.filter((p) => !p.has_children))
+const hoursPerDayFor = (row) => {
+  const date = String(row?.actual_start_date || todayStr())
+  const cal = calendars.value.find((c) => Number(c.year) === Number(date.slice(0, 4)))
+  return Number(cal?.hours_per_day || 8)
+}
+// 汇总卡片一律取末级任务累加，避免依赖中间汇总行或漏掉无上级的末级行
+const totalHours = computed(() => leafPlans.value.reduce((sum, p) => sum + Number(p.hours || 0), 0))
+const totalManDays = computed(() => leafPlans.value.reduce((sum, p) => sum + Number(p.man_days || 0), 0))
+const totalActualHours = computed(() => leafPlans.value.reduce((sum, p) => sum + Number(p.actual_hours || 0), 0))
+const totalActualManDays = computed(() => Math.round(leafPlans.value.reduce((sum, p) => {
+  const hpd = hoursPerDayFor(p)
+  return sum + (hpd > 0 ? Number(p.actual_hours || 0) / hpd : 0)
+}, 0) * 100) / 100)
 const editingRowId = computed(() => (editingCell.value ? editingCell.value.split(':')[0] : ''))
 const rowClass = ({ row }) => {
   const classes = []
@@ -533,9 +611,69 @@ function applyCalc() {
   const m = calcMetrics(form.start_date, form.end_date)
   form.hours = m.hours
   form.man_days = m.manDays
+  form.planned_amount = plannedAmountOf(form)
+  form.actual_amount = actualAmountOf(form)
 }
 watch(() => [form.start_date, form.end_date], applyCalc)
 watch(() => form.parent_id, (val) => { form.parentReady = !!val })
+
+function todayStr() {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+// 实际工时：实际开始 ~（实际完成或今天），按工作日历逐日累计
+function calcActualHours(start, end) {
+  if (!start) return 0
+  const last = end || todayStr()
+  return last < start ? 0 : calcMetrics(start, last).hours
+}
+const childRows = (id) => rows.value.filter((r) => r.parent_id === id)
+function actualHoursOf(row, seen = new Set()) {
+  if (!row || seen.has(row.id)) return 0
+  seen.add(row.id)
+  if (row.has_children) return childRows(row.id).reduce((sum, k) => sum + actualHoursOf(k, seen), 0)
+  return calcActualHours(row.actual_start_date, row.actual_end_date)
+}
+function adjustedHoursOf(row, seen = new Set()) {
+  if (!row || seen.has(row.id)) return 0
+  seen.add(row.id)
+  if (row.has_children) return childRows(row.id).reduce((sum, k) => sum + adjustedHoursOf(k, seen), 0)
+  return Number(row.adjusted_hours || 0)
+}
+function completionOf(row) {
+  const total = Number(row?.hours || 0)
+  const used = actualHoursOf(row) + adjustedHoursOf(row)
+  const raw = total > 0 ? (used / total) * 100 : 0
+  const rate = Math.round(raw * 100) / 100
+  return { rate: Math.min(100, rate), over: raw > 100 + 1e-9, raw: rate }
+}
+const fmtHours = (v) => (Math.round(Number(v || 0) * 100) / 100)
+  .toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+const roundMoney = (v) => Math.round((Number(v || 0) + Number.EPSILON) * 100) / 100
+const plannedAmountOf = (row) => roundMoney(Number(row?.day_rate || 0) * Number(row?.man_days || 0))
+function actualAmountOf(row) {
+  const date = String(row?.actual_start_date || todayStr())
+  const cal = calendars.value.find((c) => Number(c.year) === Number(date.slice(0, 4)))
+  const hoursPerDay = Number(cal?.hours_per_day || 8)
+  const hours = roundMoney(actualHoursOf(row) + adjustedHoursOf(row))
+  const manDays = hoursPerDay > 0 ? hours / hoursPerDay : 0
+  return roundMoney(Number(row?.day_rate || 0) * manDays)
+}
+const fmtMoney = (v) => Number(v || 0).toLocaleString('zh-CN', {
+  minimumFractionDigits: 2, maximumFractionDigits: 2,
+})
+const fmtPct = (v) => `${Math.round(Number(v || 0) * 10) / 10}%`
+const warnLevelOf = (ratio) => (ratio > 100 + 1e-9 ? 'danger' : (ratio >= 80 ? 'warning' : ''))
+const amountRatioOf = (row) => {
+  const planned = plannedAmountOf(row)
+  return planned > 0 ? (actualAmountOf(row) / planned) * 100 : 0
+}
+const amountWarnOf = (row) => warnLevelOf(amountRatioOf(row))
+const completionRatioOf = (row) => completionOf(row).raw
+const completionWarnOf = (row) => warnLevelOf(completionRatioOf(row))
+const completionWarnText = (row) => `完成比例 ${fmtPct(completionRatioOf(row))}，${completionWarnOf(row) === 'danger' ? '已超过 100%' : '已达到 80%'}`
+const amountWarnText = (row) => `实际金额占计划金额 ${fmtPct(amountRatioOf(row))}，${amountWarnOf(row) === 'danger' ? '已超过 100%' : '已达到 80%'}`
 
 function buildTree(source) {
   const clones = source.map((p) => ({
@@ -547,10 +685,14 @@ function buildTree(source) {
     assistant1: p.assistant1 || '',
     assistant2: p.assistant2 || '',
     track: Array.isArray(p.track) ? p.track.map((t) => ({ ...t })) : [],
+    custom_fields: p.custom_fields && typeof p.custom_fields === 'object' ? { ...p.custom_fields } : {},
     predecessor: Array.isArray(p.predecessor) ? [...p.predecessor]
       : (p.predecessor ? String(p.predecessor).split(',').filter(Boolean) : []),
     hours: Number(p.hours || 0),
     man_days: Number(p.man_days || 0),
+    day_rate: Number(p.day_rate || 0),
+    planned_amount: Number(p.planned_amount ?? p.amount ?? 0),
+    actual_amount: Number(p.actual_amount || 0),
     sort: Number(p.sort || 0),
     _new: !!p._new,
     _dirty: !!p._dirty,
@@ -596,11 +738,19 @@ function buildTree(source) {
     if (!kids.length) return
     row.has_children = true
     const dates = kids.flatMap((k) => [k.start_date, k.end_date]).filter(Boolean).sort()
+    const actualStarts = kids.map((k) => k.actual_start_date).filter(Boolean).sort()
+    const actualEnds = kids.map((k) => k.actual_end_date).filter(Boolean).sort()
     row.start_date = dates[0] || ''
     row.end_date = dates.at(-1) || ''
+    row.actual_start_date = actualStarts[0] || ''
+    row.actual_end_date = actualEnds.length === kids.length ? actualEnds.at(-1) : ''
     row.duration = workDays(row.start_date, row.end_date)
     row.hours = kids.reduce((sum, k) => sum + Number(k.hours || 0), 0)
     row.man_days = kids.reduce((sum, k) => sum + Number(k.man_days || 0), 0)
+    row.planned_amount = roundMoney(kids.reduce((sum, k) => sum + plannedAmountOf(k), 0))
+    row.actual_amount = roundMoney(kids.reduce((sum, k) => sum + actualAmountOf(k), 0))
+    row.day_rate = Number(row.man_days) > 0 ? roundMoney(row.planned_amount / Number(row.man_days)) : 0
+    syncStatusByActual(row)
   }
   for (const row of byParent.get('__root__') || []) rollup(row)
   // 默认按项目 + WBS 组合从小到大排列（WBS 为点分数值自然序）
@@ -716,8 +866,7 @@ function ganttRange(start, end) {
 function ganttBar(row) {
   const range = ganttRange(row.start_date, row.end_date)
   if (!range) return null
-  return { ...range, days: row.duration || 0,
-    progress: Math.max(0, Math.min(100, Number(row.completion_rate || 0))) }
+  return { ...range, days: row.duration || 0, progress: completionOf(row).rate }
 }
 function ganttActualBar(row) { return ganttRange(row.actual_start_date, row.actual_end_date) }
 
@@ -853,18 +1002,31 @@ async function syncWorkdays() {
   ElMessage.success(`已从${data.online ? '中国政府网' : '内置数据'}同步全年 ${data.workdays.length} 天调休，请保存生效`)
 }
 
+async function loadPlanRequired(project = '') {
+  try {
+    planRequired.value = await http.get('/archives/required-fields', {
+      params: { module: 'plan', ...(project ? { project } : {}) },
+    })
+  } catch { /* 保留上一次配置 */ }
+}
 async function loadMeta() {
   try {
     const cfg = await http.get('/config/fields', { params: { scope: 1 } })
     projectMeta.value = cfg.projects || []
     statusOptions.value = cfg.dicts?.status || []
     personnelMeta.value = cfg.personnel || []
+    applyPlanCustomFields((cfg.customFields || []).filter((f) => f.module === 'plan'))
+    await loadPlanRequired(filter.project)
   } catch (e) { ElMessage.error(e.message) }
 }
 async function onProjectChange() {
   clearTableFilters()
+  await loadPlanRequired(filter.project)
   await load()
 }
+watch(() => form.project, (project) => {
+  if (dialog.value) loadPlanRequired(project)
+})
 // 历史数据的序号可能跨项目串号；按新规则生成后静默回写，避免导出/再次读取时又出现旧序号
 async function normalizeSeqNo() {
   if (!auth.has('ISSUE_CREATE')) return
@@ -968,7 +1130,7 @@ function addDraftRows(count, anchor = null, mode = 'sibling') {
       parent_id: parentId, seq_no: '', parentReady: true,
       title: '', category: anchor?.category || '', status: '未开始',
       owner: '', assistant1: '', assistant2: '',
-      start_date: '', end_date: '', hours: 0, man_days: 0,
+      start_date: '', end_date: '', hours: 0, man_days: 0, day_rate: 0, planned_amount: 0, actual_amount: 0,
       sort: (at >= 0 ? at + 1 : rows.value.length) + i, note: '', predecessor: [], track: [], logs_count: 0,
       has_children: false, depth: 0, wbs: '', duration: 0, _new: true, _dirty: true,
     })
@@ -1009,22 +1171,27 @@ function confirmAddRows() {
   }
 }
 function openCreate() { openAddRowsDialog('card') }
-function openCard(row) {
+async function openCard(row) {
   if (!row || !auth.has('ISSUE_CREATE')) return
   cancelPendingEdit()
+  await loadPlanRequired(row.project || '')
   editing.value = row
   Object.assign(form, {
     project: row.project || '', parent_id: row.parent_id || '', seq_no: row.seq_no || '',
     parentReady: row.parentReady !== false,
     title: shortTaskTitle(row.title), category: row.category || '', status: row.status || '未开始', owner: row.owner || '',
-    assistant1: row.assistant1 || '', assistant2: row.assistant2 || '',
+    assistant1: personList(row.assistant1), assistant2: personList(row.assistant2),
     start_date: row.start_date || '', end_date: row.end_date || '',
     actual_start_date: row.actual_start_date || '', actual_end_date: row.actual_end_date || '',
-    completion_rate: Number(row.completion_rate || 0),
+    completion_rate: completionOf(row).rate, adjusted_hours: Number(row.adjusted_hours || 0),
     hours: Number(row.hours || 0), man_days: Number(row.man_days || 0),
+    day_rate: Number(row.day_rate || 0),
+    planned_amount: Number(row.planned_amount ?? row.amount ?? 0),
+    actual_amount: Number(row.actual_amount || 0),
     sort: Number(row.sort || 0), note: row.note || '',
     predecessor: Array.isArray(row.predecessor) ? [...row.predecessor] : [],
     track: Array.isArray(row.track) ? row.track.map((t) => ({ ...t })) : [],
+    custom_fields: { ...(row.custom_fields || {}) },
   })
   applyCalc()
   dialog.value = true
@@ -1039,6 +1206,7 @@ function cancelPendingEdit(keepSnapshot = false) {
   if (!keepSnapshot) editSnapshot = null
 }
 function startEdit(row, field) {
+  if (row.has_children) return ElMessage.warning('有下级的任务由下级自动汇总，禁止直接修改')
   if (!auth.has('ISSUE_CREATE')) return
   if (field === 'title' && row._new && !row.parentReady) {
     return ElMessage.warning('请先选择上级任务（一级任务请选择“一级任务（无上级）”）后再填写任务名称')
@@ -1083,7 +1251,10 @@ function commitTitleEdit(row) {
 }
 function cancelCell(row, field) {
   if (!editSnapshot || editSnapshot.id !== row.id || editSnapshot.field !== field) return
-  row[field] = cloneVal(editSnapshot.value)
+  if (String(field).startsWith('custom:')) {
+    ensureCustomFields(row)
+    row.custom_fields[field.slice(7)] = cloneVal(editSnapshot.value)
+  } else row[field] = cloneVal(editSnapshot.value)
   row._dirty = editSnapshot.dirty
   cancelPendingEdit()
   editingCell.value = ''
@@ -1094,23 +1265,50 @@ function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
   cancelPendingEdit(true)
   if (!editingCell.value) return
-  const [id, field] = editingCell.value.split(':')
+  const [id, rawField] = editingCell.value.split(':')
+  const field = rawField?.startsWith('cf_') ? `custom:${rawField}` : rawField
   const row = rows.value.find((r) => r.id === id)
   if (row) cancelCell(row, field)
   else editingCell.value = ''
 }
 function commitCell(row, field, value) {
+  if (row.has_children) return ElMessage.warning('有下级的任务由下级自动汇总，禁止直接修改')
   if (!auth.has('ISSUE_CREATE')) return
   cancelPendingEdit()
   if (field === 'predecessor') row.predecessor = Array.isArray(value) ? [...value] : []
   else {
-    if (!row.has_children && field === 'actual_start_date' && value && !row.actual_start_date) row.status = '进行中'
-    if (!row.has_children && field === 'actual_end_date' && value && !row.actual_end_date) row.status = '已解决'
-    row[field] = value
+    row[field] = ['adjusted_hours', 'day_rate'].includes(field) ? (Number(value) || 0) : value
+    if (field === 'day_rate') {
+      row.planned_amount = plannedAmountOf(row)
+      row.actual_amount = actualAmountOf(row)
+    }
+    if (field === 'actual_start_date' || field === 'actual_end_date') syncStatusByActual(row)
   }
   row._dirty = true
   editingCell.value = ''
-  if (field === 'start_date' || field === 'end_date') rebuild()
+  if (['start_date', 'end_date', 'actual_start_date', 'actual_end_date'].includes(field)) rebuild()
+  else if (field === 'adjusted_hours') row.completion_rate = completionOf(row).rate
+}
+function startCustomEdit(row, key) {
+  if (row.has_children) return ElMessage.warning('有下级的任务由下级自动汇总，禁止直接修改')
+  if (!auth.has('ISSUE_CREATE')) return
+  cancelPendingEdit()
+  ensureCustomFields(row)
+  editSnapshot = {
+    id: row.id, field: `custom:${key}`,
+    value: cloneVal(row.custom_fields[key] ?? ''), dirty: !!row._dirty,
+  }
+  const target = `${row.id}:${key}`
+  editTimer = setTimeout(() => { editingCell.value = target; editTimer = null }, 180)
+}
+function commitCustomCell(row, key, value) {
+  if (row.has_children) return ElMessage.warning('有下级的任务由下级自动汇总，禁止直接修改')
+  if (!auth.has('ISSUE_CREATE')) return
+  cancelPendingEdit()
+  ensureCustomFields(row)
+  row.custom_fields[key] = value
+  row._dirty = true
+  editingCell.value = ''
 }
 // 序号按点分层级：1.2 的上级为 1；返回 undefined 表示未找到上级，保留原上级
 function inferParentBySeq(seq, selfId) {
@@ -1136,11 +1334,20 @@ function onFormSeqChange() {
   const parentId = inferParentBySeq(form.seq_no, editing.value?.id)
   if (parentId !== undefined) form.parent_id = parentId
 }
+function planFieldEmpty(key, source) {
+  const v = String(key).startsWith('cf_') ? source?.custom_fields?.[key] : source?.[key]
+  return v === '' || v == null || (Array.isArray(v) && !v.length)
+}
+function firstMissingPlanRequired(source) {
+  return planRequired.value.find((key) => planFieldEmpty(key, source)) || ''
+}
 function validateDirty() {
   for (const r of rows.value.filter((x) => x._dirty)) {
     const at = r.wbs || '新增'
     if (!r.project) { ElMessage.warning(`第 ${at} 行未选择项目`); return false }
     if (!hasTaskName(r)) { ElMessage.warning(`第 ${at} 行任务名称必填`); return false }
+    const missing = firstMissingPlanRequired(r)
+    if (missing) { ElMessage.warning(`第 ${at} 行${planFieldLabel(missing)}必填`); return false }
     if (r.start_date && r.end_date && r.end_date < r.start_date) {
       ElMessage.warning(`第 ${at} 行完成时间不能早于开始时间`); return false
     }
@@ -1157,11 +1364,14 @@ function payloadOf(r) {
     assistant1: r.assistant1 || '', assistant2: r.assistant2 || '',
     start_date: r.start_date || null, end_date: r.end_date || null,
     actual_start_date: r.actual_start_date || null, actual_end_date: r.actual_end_date || null,
-    completion_rate: Number(r.completion_rate) || 0,
+    completion_rate: completionOf(r).rate, adjusted_hours: Number(r.adjusted_hours) || 0,
     hours: Number(r.hours) || 0, man_days: Number(r.man_days) || 0,
+    day_rate: Number(r.day_rate) || 0,
+    amount: plannedAmountOf(r), planned_amount: plannedAmountOf(r), actual_amount: actualAmountOf(r),
     sort: Number(r.sort) || 0, note: r.note || '',
     predecessor: (r.predecessor || []).join(','),
     track: (r.track || []).map((t) => ({ date: t.date, text: t.text, by: t.by })),
+    custom_fields: { ...(r.custom_fields || {}) },
   }
 }
 async function saveAll() {
@@ -1195,7 +1405,7 @@ const batchFields = [
   { key: 'end_date', label: '完成时间' },
   { key: 'actual_start_date', label: '实际开始' },
   { key: 'actual_end_date', label: '实际完成' },
-  { key: 'completion_rate', label: '完成比例' },
+  { key: 'adjusted_hours', label: '调整工时' },
   { key: 'note', label: '备注' },
 ]
 const batchOptions = computed(() => {
@@ -1207,19 +1417,26 @@ const batchOptions = computed(() => {
   }
 })
 const batchIsDate = computed(() => ['start_date', 'end_date', 'actual_start_date', 'actual_end_date'].includes(batchField.value))
-function onBatchFieldChange() { batchValue.value = '' }
+const batchIsPersonMulti = computed(() => multiPersonKeys.includes(batchField.value))
+function onBatchFieldChange() {
+  batchValue.value = batchIsPersonMulti.value ? [] : ''
+}
 async function applyBatch() {
-  const actualDateField = ['actual_start_date', 'actual_end_date'].includes(batchField.value)
-  const targets = selection.value.filter((r) => !r._new && (!actualDateField || !r.has_children))
-  if (!targets.length) return ElMessage.warning(actualDateField
-    ? '实际日期仅末级任务可填写，请勾选末级任务' : '请先勾选已保存的计划行')
-  if (batchValue.value === '' || batchValue.value == null) return ElMessage.warning('请选择或填写目标值')
+  const targets = selection.value.filter((r) => !r._new && !r.has_children)
+  if (!targets.length) return ElMessage.warning('请先勾选已保存的末级任务')
+  const emptyValue = batchValue.value === '' || batchValue.value == null
+    || (Array.isArray(batchValue.value) && !batchValue.value.length)
+  if (emptyValue) return ElMessage.warning('请选择或填写目标值')
+  if (batchField.value === 'adjusted_hours' && Number.isNaN(Number(batchValue.value))) {
+    return ElMessage.warning('调整工时须为数字，负数表示扣减')
+  }
+  const value = batchIsPersonMulti.value ? personJoin(batchValue.value) : batchValue.value
   batchSaving.value = true
   try {
     await batchSavePlans(targets.map((r) => {
-      const next = { ...r, [batchField.value]: batchValue.value }
-      if (batchField.value === 'actual_end_date' && !r.actual_end_date) next.status = '已解决'
-      else if (batchField.value === 'actual_start_date' && !r.actual_start_date) next.status = '进行中'
+      const next = { ...r, [batchField.value]: batchField.value === 'adjusted_hours'
+        ? Number(batchValue.value) : value }
+      if (batchField.value === 'actual_start_date' || batchField.value === 'actual_end_date') syncStatusByActual(next)
       return payloadOf(next)
     }))
     ElMessage.success(`已批量更新 ${targets.length} 行（逐行留痕）`)
@@ -1234,14 +1451,15 @@ async function applyBatch() {
   }
 }
 async function saveCard() {
+  if (editing.value?.has_children) return ElMessage.warning('有下级的任务由下级自动汇总，禁止直接修改')
   if (!form.project) return ElMessage.warning('请选择项目')
   if (editing.value._new && !form.parentReady) {
     return ElMessage.warning('请先选择上级任务（一级任务请选择“一级任务（无上级）”）后再填写任务名称')
   }
   if (!String(form.title || '').trim()) return ElMessage.warning('任务名称必填')
+  const missing = firstMissingPlanRequired(form)
+  if (missing) return ElMessage.warning(`${planFieldLabel(missing)}必填`)
   const oldParentId = editing.value.parent_id || null
-  const hadActualStart = !!editing.value.actual_start_date
-  const hadActualEnd = !!editing.value.actual_end_date
   const parentId = form.parent_id === '__root__' ? null : (form.parent_id || null)
   Object.assign(editing.value, {
     project: form.project,
@@ -1250,19 +1468,20 @@ async function saveCard() {
     parentReady: true,
     title: withParentPrefix(form.title.trim(), parentId),
     category: form.category || '', status: form.status || '未开始', owner: form.owner || '',
-    assistant1: form.assistant1 || '', assistant2: form.assistant2 || '',
+    assistant1: personJoin(form.assistant1), assistant2: personJoin(form.assistant2),
     start_date: form.start_date || null, end_date: form.end_date || null,
     actual_start_date: form.actual_start_date || null, actual_end_date: form.actual_end_date || null,
-    completion_rate: Number(form.completion_rate) || 0,
+    completion_rate: Number(form.completion_rate) || 0, adjusted_hours: Number(form.adjusted_hours) || 0,
     hours: Number(form.hours) || 0, man_days: Number(form.man_days) || 0,
+    day_rate: Number(form.day_rate) || 0,
+    amount: plannedAmountOf(form), planned_amount: plannedAmountOf(form), actual_amount: actualAmountOf(form),
     sort: Number(form.sort) || 0, note: form.note || '',
     predecessor: [...form.predecessor],
     track: form.track.map((t) => ({ ...t })),
+    custom_fields: { ...form.custom_fields },
   })
-  if (!editing.value.has_children) {
-    if (!hadActualEnd && editing.value.actual_end_date) editing.value.status = '已解决'
-    else if (!hadActualStart && editing.value.actual_start_date) editing.value.status = '进行中'
-  }
+  syncStatusByActual(editing.value)
+  editing.value.completion_rate = completionOf(editing.value).rate
   editing.value._dirty = true
   if (editing.value._new) {
     if (oldParentId !== parentId) moveRowAfterParent(editing.value, parentId)
@@ -1277,6 +1496,7 @@ async function saveCard() {
   await saveAll()
 }
 async function remove(row) {
+  if (row.has_children) return ElMessage.warning('有下级的任务由下级自动汇总，禁止直接修改')
   const affected = [{ parent_id: row.parent_id || null, project: row.project }]
   if (row._new) {
     rows.value = rows.value.filter((r) => r !== row)
@@ -1299,7 +1519,7 @@ function onSelectionChange(value) { selection.value = value }
 async function deleteSelected() {
   const targets = [...selection.value]
   if (!targets.length) return
-  const saved = targets.filter((r) => !r._new)
+  const saved = targets.filter((r) => !r._new && !r.has_children)
   const remainingDirty = rows.value.filter((r) => r._dirty && !targets.includes(r))
   if (saved.length) {
     const message = remainingDirty.length
@@ -1493,7 +1713,10 @@ onUnmounted(() => {
             <el-radio-button value="month">月</el-radio-button>
           </el-radio-group>
         </template>
-        <el-button size="small" @click="ganttVisible = !ganttVisible">
+        <el-button size="small" @click="toggleTable">
+          {{ tableVisible ? '隐藏表格' : '显示表格' }}
+        </el-button>
+        <el-button size="small" @click="toggleGantt">
           {{ ganttVisible ? '隐藏甘特图' : '显示甘特图' }}
         </el-button>
         <el-button v-if="auth.has('ISSUE_CREATE')" size="small" @click="openCalendar">日历设置</el-button>
@@ -1505,9 +1728,10 @@ onUnmounted(() => {
 
     <div class="kpis">
       <div class="kpi"><div class="num">{{ plans.length }}</div><div class="lbl">计划条目</div></div>
-      <div class="kpi"><div class="num">{{ plans.filter((p) => !p.parent_id).length }}</div><div class="lbl">顶层计划</div></div>
       <div class="kpi"><div class="num">{{ totalHours }}</div><div class="lbl">总工时（h）</div></div>
       <div class="kpi"><div class="num">{{ totalManDays }}</div><div class="lbl">总人天</div></div>
+      <div class="kpi"><div class="num">{{ fmtHours(totalActualHours) }}</div><div class="lbl">实际工时（h）</div></div>
+      <div class="kpi"><div class="num">{{ fmtHours(totalActualManDays) }}</div><div class="lbl">实际总人天</div></div>
     </div>
 
     <el-card shadow="never" v-loading="loading">
@@ -1518,11 +1742,13 @@ onUnmounted(() => {
         </div>
       </template>
       <div ref="planGrid" class="plan-grid" :class="{ dragging }" :style="{ height: `${gridHeight}px` }">
-        <div class="list-pane" :style="ganttVisible ? { width: `${leftPaneWidth}px` } : { flex: 1, width: '100%' }">
+        <div v-if="tableVisible" class="list-pane"
+          :style="ganttVisible ? { width: `${leftPaneWidth}px` } : { flex: 1, width: '100%' }">
           <el-table ref="leftTable" class="plan-table" :data="filteredRows" row-key="id" border stripe size="small"
             height="100%" :row-class-name="rowClass" @row-dblclick="openCard"
             @selection-change="onSelectionChange" @scroll="onLeftScroll" @filter-change="onFilterChange">
-            <el-table-column v-if="auth.has('ISSUE_CREATE')" type="selection" width="46" :fixed="leftFixed" />
+            <el-table-column v-if="auth.has('ISSUE_CREATE')" type="selection" width="46" :fixed="leftFixed"
+              :selectable="(row) => !row.has_children" />
         <el-table-column v-for="(col, i) in visibleColumns" :key="col.key" :prop="col.field" :label="col.label"
           :width="col.width" :min-width="col.minWidth" :class-name="`col-${col.key}`" :fixed="colFixed(i)"
           :sortable="col.sortable || false" :sort-method="col.sortable ? compareWbs : undefined"
@@ -1565,11 +1791,33 @@ onUnmounted(() => {
               :model-value="titleDrafts[row.id] ?? shortTaskTitle(row.title)" size="small" maxlength="255"
               @input="titleDrafts[row.id] = $event" @blur="commitTitleEdit(row)"
               @keyup.enter="$event.target.blur()" @dblclick.stop="openCard(row)" />
-            <div v-else-if="col.key === 'title'" class="cell title-cell"
+            <div v-else-if="col.key === 'title'" class="cell title-cell warn-cell"
               :class="{ disabled: row._new && !row.parentReady }"
               :style="{ paddingLeft: `${row.depth * 16}px` }" @click="startEdit(row, 'title')"
-              @dblclick.stop="openCard(row)">{{ shortTaskTitle(row.title) || (row._new && !row.parentReady ? '请先选择上级任务' : '点击填写任务名称') }}</div>
+              @dblclick.stop="openCard(row)">
+              <span>{{ shortTaskTitle(row.title) || (row._new && !row.parentReady ? '请先选择上级任务' : '点击填写任务名称') }}</span>
+              <el-tooltip v-if="completionWarnOf(row)" :content="completionWarnText(row)" placement="top">
+                <el-icon class="warn-icon" :class="completionWarnOf(row) === 'danger' ? 'warn-danger' : 'warn-warning'">
+                  <WarningFilled v-if="completionWarnOf(row) === 'danger'" />
+                  <Warning v-else />
+                </el-icon>
+              </el-tooltip>
+            </div>
 
+            <el-select v-else-if="multiPersonKeys.includes(col.key) && isEditing(row, col.key)"
+              :model-value="row._assistDraft ?? personList(row[col.key])" multiple filterable clearable collapse-tags
+              collapse-tags-tooltip size="small" style="width:100%"
+              @change="row._assistDraft = $event"
+              @visible-change="(v) => {
+                if (v) return
+                if (row._assistDraft) {
+                  const value = personJoin(row._assistDraft)
+                  delete row._assistDraft
+                  commitCell(row, col.key, value)
+                } else cancelCell(row, col.key)
+              }" @dblclick.stop="openCard(row)">
+              <el-option v-for="name in personOptionsWith(row[col.key])" :key="name" :value="name" :label="name" />
+            </el-select>
             <el-select v-else-if="personKeys.includes(col.key) && isEditing(row, col.key)"
               :model-value="row[col.key] || ''" size="small" filterable clearable style="width:100%"
               @change="commitCell(row, col.key, $event || '')"
@@ -1577,7 +1825,7 @@ onUnmounted(() => {
               <el-option v-for="name in personOptionsWith(row[col.key])" :key="name" :value="name" :label="name" />
             </el-select>
             <div v-else-if="personKeys.includes(col.key)" class="cell"
-              @click="startEdit(row, col.key)" @dblclick.stop="openCard(row)">{{ row[col.key] || '—' }}</div>
+              @click="startEdit(row, col.key)" @dblclick.stop="openCard(row)">{{ personLabel(row[col.key]) }}</div>
 
             <span v-else-if="col.key === 'duration'" class="duration">{{ row.duration }} 个工作日</span>
 
@@ -1601,12 +1849,24 @@ onUnmounted(() => {
               {{ row[col.key] || '—' }}
             </div>
 
-            <el-input-number v-else-if="col.key === 'completion_rate' && isEditing(row, col.key)"
-              v-model="row.completion_rate" :min="0" :max="100" :precision="1" size="small"
-              controls-position="right" style="width:100%"
-              @change="commitCell(row, col.key, row.completion_rate)" @dblclick.stop="openCard(row)" />
-            <div v-else-if="col.key === 'completion_rate'" class="cell" @click="startEdit(row, col.key)"
-              @dblclick.stop="openCard(row)">{{ row.completion_rate || 0 }}%</div>
+            <div v-else-if="col.key === 'actual_hours'" class="cell" @dblclick.stop="openCard(row)">
+              {{ fmtHours(actualHoursOf(row)) }}</div>
+
+            <el-input-number v-else-if="col.key === 'adjusted_hours' && isEditing(row, col.key)"
+              :model-value="Number(row.adjusted_hours || 0)" :min="-1000000" :max="1000000" :precision="2"
+              :step="1" :disabled="!!row.has_children" controls-position="right" size="small" style="width:100%"
+              @change="commitCell(row, 'adjusted_hours', $event)" @dblclick.stop="openCard(row)" />
+            <div v-else-if="col.key === 'adjusted_hours'" class="cell"
+              :class="{ disabled: !!row.has_children }"
+              @click="!row.has_children && startEdit(row, 'adjusted_hours')" @dblclick.stop="openCard(row)">
+              {{ fmtHours(adjustedHoursOf(row)) }}</div>
+
+            <div v-else-if="col.key === 'completion_rate'" class="cell rate-cell" @dblclick.stop="openCard(row)">
+              {{ completionOf(row).rate }}%
+              <el-tooltip v-if="completionOf(row).over" content="实际工时超过计划工时，按 100% 显示" placement="top">
+                <el-icon class="rate-warning"><WarningFilled /></el-icon>
+              </el-tooltip>
+            </div>
 
             <el-select v-else-if="col.key === 'predecessor' && isEditing(row, 'predecessor')"
               v-model="row.predecessor" multiple filterable size="small" style="width:100%"
@@ -1660,24 +1920,62 @@ onUnmounted(() => {
             <div v-else-if="col.key === 'project'" class="cell" @click="startEdit(row, 'project')"
               @dblclick.stop="openCard(row)">{{ row.project || '—' }}</div>
 
+            <el-input-number v-else-if="col.key === 'day_rate' && isEditing(row, col.key)"
+              :model-value="Number(row.day_rate || 0)" :min="0" :max="100000000" :precision="2" :step="100"
+              :disabled="!!row.has_children" controls-position="right" size="small" style="width:100%"
+              @change="commitCell(row, 'day_rate', $event)" @dblclick.stop="openCard(row)" />
+            <div v-else-if="col.key === 'day_rate'" class="cell"
+              :class="{ disabled: !!row.has_children }"
+              @click="!row.has_children && startEdit(row, 'day_rate')" @dblclick.stop="openCard(row)">
+              {{ fmtMoney(row.day_rate) }}</div>
+            <div v-else-if="col.key === 'planned_amount'" class="cell">{{ fmtMoney(plannedAmountOf(row)) }}</div>
+            <div v-else-if="col.key === 'actual_amount'" class="cell warn-cell">
+              {{ fmtMoney(actualAmountOf(row)) }}
+              <el-tooltip v-if="amountWarnOf(row)" :content="amountWarnText(row)" placement="top">
+                <el-icon class="warn-icon" :class="amountWarnOf(row) === 'danger' ? 'warn-danger' : 'warn-warning'">
+                  <WarningFilled v-if="amountWarnOf(row) === 'danger'" />
+                  <Warning v-else />
+                </el-icon>
+              </el-tooltip>
+            </div>
+
             <span v-else-if="col.key === 'hours'">{{ row.hours }}</span>
             <span v-else-if="col.key === 'man_days'">{{ row.man_days }}</span>
+
+            <template v-else-if="col.custom">
+              <el-input-number v-if="isEditing(row, col.key) && customFieldDef(col.key)?.type === 'number'"
+                :model-value="Number(customValue(row, col.key) || 0)" :controls="false" :precision="2"
+                size="small" style="width:100%" @change="commitCustomCell(row, col.key, $event)"
+                @dblclick.stop="openCard(row)" />
+              <el-date-picker v-else-if="isEditing(row, col.key) && customFieldDef(col.key)?.type === 'date'"
+                :model-value="customValue(row, col.key)" type="date" value-format="YYYY-MM-DD" size="small"
+                style="width:100%" @change="commitCustomCell(row, col.key, $event)"
+                @dblclick.stop="openCard(row)" />
+              <el-input v-else-if="isEditing(row, col.key)" :model-value="customValue(row, col.key)" size="small"
+                @blur="commitCustomCell(row, col.key, $event.target.value)"
+                @keyup.enter="$event.target.blur()" @dblclick.stop="openCard(row)" />
+              <div v-else class="cell" @click="startCustomEdit(row, col.key)" @dblclick.stop="openCard(row)">
+                {{ fieldValue(row, col.key) || '—' }}
+              </div>
+            </template>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="176" fixed="right">
           <template #default="{ row }">
             <el-button v-if="auth.has('ISSUE_CREATE')" type="primary" size="small" @click="openCard(row)">编辑</el-button>
-            <el-button v-if="auth.has('ISSUE_CREATE')" type="danger" size="small" @click="remove(row)">删除</el-button>
+            <el-button v-if="auth.has('ISSUE_CREATE')" type="danger" size="small"
+              :disabled="!!row.has_children" :title="row.has_children ? '有下级的任务禁止修改' : ''"
+              @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
           </el-table>
         </div>
-        <div v-if="ganttVisible" class="pane-divider" title="拖动调整宽度，双击重置"
+        <div v-if="ganttVisible && tableVisible" class="pane-divider" title="拖动调整宽度，双击重置"
           @pointerdown="startResize" @dblclick="resetResize">
           <span class="divider-grip" />
         </div>
         <div v-if="ganttVisible" class="gantt-pane">
-          <el-button class="gantt-hide" size="small" text bg @click="ganttVisible = false">隐藏</el-button>
+          <el-button class="gantt-hide" size="small" text bg @click="toggleGantt">隐藏</el-button>
           <div ref="ganttScroll" class="gantt-scroll" @scroll="onGanttScroll">
             <div class="gantt-head" :style="{ width: `${ganttWidth}px` }">
               <div class="gantt-months">
@@ -1703,9 +2001,16 @@ onUnmounted(() => {
                     <div class="gantt-bar-progress" :style="{ width: `${ganttBar(row).progress}%` }" />
                     <span class="gantt-bar-label">{{ shortTaskTitle(row.title) }}</span>
                   </div>
-                  <div v-if="ganttActualBar(row)" class="gantt-actual-bar"
-                    :style="{ left: `${ganttActualBar(row).left}px`, width: `${ganttActualBar(row).width}px` }"
-                    :title="`实际：${row.actual_start_date} ~ ${row.actual_end_date}（完成 ${row.completion_rate || 0}%）`" />
+                  <template v-if="ganttActualBar(row)">
+                    <div class="gantt-actual-bar"
+                      :style="{ left: `${ganttActualBar(row).left}px`, width: `${ganttActualBar(row).width}px` }"
+                      :title="`实际：${row.actual_start_date} ~ ${row.actual_end_date}`" />
+                    <span class="gantt-actual-label"
+                      :style="{ left: `${ganttActualBar(row).left + ganttActualBar(row).width + 6}px` }">
+                      {{ completionOf(row).rate }}%
+                      <el-icon v-if="completionOf(row).over" class="rate-warning"><WarningFilled /></el-icon>
+                    </span>
+                  </template>
                 </div>
               </div>
             </div>
@@ -1745,7 +2050,7 @@ onUnmounted(() => {
       <div class="card-grid">
         <el-card shadow="never" class="edit-card">
           <template #header><span class="card-title">基础信息</span></template>
-          <el-form :model="form" label-width="86px" size="small">
+          <el-form :model="form" :disabled="rolledUp" label-width="86px" size="small">
             <el-form-item label="项目" required>
               <el-select v-model="form.project" placeholder="请选择项目" style="width:100%">
                 <el-option v-for="p in projectOptions" :key="p.value" :value="p.value" :label="p.label" />
@@ -1781,7 +2086,8 @@ onUnmounted(() => {
             </el-form-item>
             <el-form-item v-for="key in personKeys" :key="key"
               :label="key === 'owner' ? '负责人' : (key === 'assistant1' ? '配合人1' : '配合人2')">
-              <el-select v-model="form[key]" filterable clearable placeholder="请选择人员">
+              <el-select v-model="form[key]" :multiple="multiPersonKeys.includes(key)" filterable clearable
+                collapse-tags collapse-tags-tooltip placeholder="请选择人员">
                 <el-option v-for="name in personOptionsWith(form[key])" :key="name" :value="name" :label="name" />
               </el-select>
             </el-form-item>
@@ -1790,7 +2096,7 @@ onUnmounted(() => {
         </el-card>
         <el-card shadow="never" class="edit-card">
           <template #header><span class="card-title">时间与工作量</span></template>
-          <el-form :model="form" label-width="86px" size="small">
+          <el-form :model="form" :disabled="rolledUp" label-width="86px" size="small">
             <el-form-item label="开始时间">
               <el-date-picker v-model="form.start_date" type="date" value-format="YYYY-MM-DD" style="width:100%"
                 :disabled="rolledUp" :cell-class-name="planDateCellClass" />
@@ -1807,9 +2113,21 @@ onUnmounted(() => {
               <el-date-picker v-model="form.actual_end_date" type="date" value-format="YYYY-MM-DD"
                 style="width:100%" :disabled="rolledUp" />
             </el-form-item>
+            <el-form-item label="实际工时">
+              <el-input :model-value="editing ? fmtHours(actualHoursOf(editing)) : 0" disabled />
+            </el-form-item>
+            <el-form-item label="调整工时">
+              <el-input-number v-model="form.adjusted_hours" :min="-1000000" :max="1000000" :precision="2"
+                :step="1" :disabled="rolledUp" style="width:100%" />
+            </el-form-item>
             <el-form-item label="完成比例">
-              <el-input-number v-model="form.completion_rate" :min="0" :max="100" :precision="1"
-                style="width:100%" />
+              <div class="rate-readonly">
+                <span>{{ editing ? completionOf(editing).rate : 0 }}%</span>
+                <el-tooltip v-if="editing && completionOf(editing).over" content="实际工时超过计划工时，按 100% 显示"
+                  placement="top">
+                  <el-icon class="rate-warning"><WarningFilled /></el-icon>
+                </el-tooltip>
+              </div>
             </el-form-item>
             <el-form-item label="工期">
               <el-input :model-value="`${workDays(form.start_date, form.end_date)} 个工作日`" disabled />
@@ -1822,13 +2140,28 @@ onUnmounted(() => {
               <el-input-number v-model="form.man_days" :min="0" :step="0.5" style="width:100%"
                 :disabled="rolledUp || autoCalc" />
             </el-form-item>
-            <div v-if="rolledUp" class="hint">该任务有下级，时间/实际日期/工时/人天由下级自动汇总。</div>
+            <div v-if="rolledUp" class="hint">该任务有下级，时间/实际日期/工时/人天/调整工时由下级自动汇总。</div>
             <div v-else-if="autoCalc" class="hint">已按日历根据起止日期自动计算工时与人天。</div>
+          </el-form>
+        </el-card>
+        <el-card v-if="planCustomFields.length" shadow="never" class="edit-card span-2">
+          <template #header><span class="card-title">自定义字段（项目计划）</span></template>
+          <el-form :model="form.custom_fields" :disabled="rolledUp" label-width="110px" size="small">
+            <el-form-item v-for="f in planCustomFields" :key="f.key" :label="f.label"
+              :required="planRequired.includes(f.key)">
+              <el-input-number v-if="f.type === 'number'" v-model="form.custom_fields[f.key]"
+                :controls="false" :precision="2" style="width:100%" />
+              <el-date-picker v-else-if="f.type === 'date'" v-model="form.custom_fields[f.key]" type="date"
+                value-format="YYYY-MM-DD" style="width:100%" />
+              <el-input v-else-if="f.type === 'textarea'" v-model="form.custom_fields[f.key]" type="textarea"
+                :rows="2" />
+              <el-input v-else v-model="form.custom_fields[f.key]" />
+            </el-form-item>
           </el-form>
         </el-card>
         <el-card shadow="never" class="edit-card span-2">
           <template #header><span class="card-title">依赖与备注</span></template>
-          <el-form :model="form" label-width="86px" size="small">
+          <el-form :model="form" :disabled="rolledUp" label-width="86px" size="small">
             <el-form-item label="前置任务">
               <el-select v-model="form.predecessor" multiple filterable style="width:100%" placeholder="可多选">
                 <el-option v-for="opt in rowOptions" :key="opt.value" :value="opt.value" :label="opt.label"
@@ -1842,7 +2175,8 @@ onUnmounted(() => {
       </div>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button v-if="auth.has('ISSUE_CREATE')" type="primary" :loading="saving" @click="saveCard">保存</el-button>
+        <el-button v-if="auth.has('ISSUE_CREATE')" type="primary" :disabled="rolledUp" :loading="saving"
+          @click="saveCard">保存</el-button>
       </template>
     </el-dialog>
 
@@ -1854,7 +2188,8 @@ onUnmounted(() => {
           </el-select>
         </el-form-item>
         <el-form-item label="目标值">
-          <el-select v-if="batchOptions.length" v-model="batchValue" filterable style="width:100%"
+          <el-select v-if="batchOptions.length" v-model="batchValue" :multiple="batchIsPersonMulti"
+            filterable collapse-tags collapse-tags-tooltip style="width:100%"
             :placeholder="batchIsDate ? '请选择日期' : '请选择'">
             <el-option v-for="o in batchOptions" :key="o" :value="o" :label="o" />
           </el-select>
@@ -2119,8 +2454,18 @@ onUnmounted(() => {
   background: color-mix(in srgb, #000 26%, transparent); border-radius: 8px 0 0 8px; }
 .gantt-bar-label { position: relative; z-index: 1; display: block; max-width: 100%; padding: 0 6px; color: #fff;
   font-size: 10px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.summary-row .cell { cursor: not-allowed; color: var(--el-text-color-placeholder); }
 .gantt-actual-bar { position: absolute; top: 26px; height: 5px; border-radius: 3px;
   background: var(--el-color-warning); opacity: 0.95; }
+.gantt-actual-label { position: absolute; top: 19px; height: 14px; font-size: 10px; line-height: 14px;
+  color: var(--el-color-warning); white-space: nowrap; }
+.rate-cell { display: inline-flex; align-items: center; gap: 3px; }
+.rate-readonly { display: inline-flex; align-items: center; gap: 5px; }
+.rate-warning { color: var(--el-color-danger); font-size: 13px; vertical-align: -1px; }
+.warn-cell { display: inline-flex; align-items: center; gap: 4px; }
+.warn-icon { font-size: 14px; vertical-align: -1px; }
+.warn-warning { color: var(--el-color-warning); }
+.warn-danger { color: var(--el-color-danger); }
 .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .edit-card .el-form-item { margin-bottom: 12px; }
 .span-2 { grid-column: 1 / -1; }

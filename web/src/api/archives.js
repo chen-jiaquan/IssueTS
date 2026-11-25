@@ -54,11 +54,12 @@ export const createCustomField = (d) => http.post('/archives/custom-fields', d)
 export const updateCustomField = (key, d) => http.put(`/archives/custom-fields/${key}`, d)
 export const deleteCustomField = (key) => http.delete(`/archives/custom-fields/${key}`)
 
-export const getRequiredFields = (project) =>
-  http.get('/archives/required-fields', project ? { params: { project } } : {})
-export const getRequiredFieldRules = () => http.get('/archives/required-fields/rules')
-export const putRequiredFields = (fields, project) =>
-  http.put('/archives/required-fields', { fields }, project ? { params: { project } } : {})
+export const getRequiredFields = (project, module = 'issue') =>
+  http.get('/archives/required-fields', { params: { ...(project ? { project } : {}), module } })
+export const getRequiredFieldRules = (module = 'issue') =>
+  http.get('/archives/required-fields/rules', { params: { module } })
+export const putRequiredFields = (fields, project, module = 'issue') =>
+  http.put('/archives/required-fields', { fields }, { params: { ...(project ? { project } : {}), module } })
 
 export const listNoticeTypes = () => http.get('/archives/notice-types')
 export const createNoticeType = (d) => http.post('/archives/notice-types', d)

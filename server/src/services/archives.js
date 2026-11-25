@@ -76,7 +76,7 @@ function projectScopeClause(scope, project, startIdx, alias = '') {
 }
 
 // ---------- 项目 ----------
-const PROJECT_COLS = `code, name, note, color, enabled, preset, status, applicant, applied_at,
+const PROJECT_COLS = `code, name, note, color, contract_man_days, enabled, preset, status, applicant, applied_at,
   reviewed_by, reviewed_at, review_note`
 // 默认只返回已生效项目，避免申请中的项目进入业务下拉；档案页通过 includePending 查看全部。
 export const listProjects = (scope, includePending = false) => pool.query(
@@ -86,9 +86,9 @@ export const listProjects = (scope, includePending = false) => pool.query(
    ORDER BY (status = '申请中') DESC, code`, scope && scope.length ? [scope] : []).then((r) => r.rows)
 export async function createProject(b) {
   try {
-    await pool.query(`INSERT INTO projects(code, name, note, color, enabled, preset, status)
-      VALUES ($1,$2,$3,$4,COALESCE($5,true),COALESCE($6,false),'已生效')`,
-      [b.code, b.name ?? b.code, b.note, b.color, b.enabled, b.preset])
+    await pool.query(`INSERT INTO projects(code, name, note, color, contract_man_days, enabled, preset, status)
+      VALUES ($1,$2,$3,$4,COALESCE($5,0),COALESCE($6,true),COALESCE($7,false),'已生效')`,
+      [b.code, b.name ?? b.code, b.note, b.color, b.contract_man_days, b.enabled, b.preset])
     return (await pool.query(`SELECT ${PROJECT_COLS} FROM projects WHERE code=$1`, [b.code])).rows[0]
   } catch (e) { wrap(e) }
 }
@@ -107,8 +107,9 @@ export async function updateProject(code, b, req) {
   try {
     const { rows } = await pool.query(
       `UPDATE projects SET name=COALESCE($2,name), note=COALESCE($3,note), color=COALESCE($4,color),
-         enabled=COALESCE($5,enabled), preset=COALESCE($6,preset) WHERE code=$1 RETURNING ${PROJECT_COLS}`,
-      [code, b.name, b.note, b.color, b.enabled, b.preset])
+         contract_man_days=COALESCE($5,contract_man_days), enabled=COALESCE($6,enabled),
+         preset=COALESCE($7,preset) WHERE code=$1 RETURNING ${PROJECT_COLS}`,
+      [code, b.name, b.note, b.color, b.contract_man_days, b.enabled, b.preset])
     if (!rows.length) throw new HttpError(404, ERR.NOT_FOUND, '项目不存在')
     // 问题表单的项目下拉来自 dict_key='project' 字典项，保持两边状态一致
     if (typeof b.enabled === 'boolean') {
@@ -248,10 +249,10 @@ async function syncPersonnelUser(person) {
   await createUser({ username, password: await getDefaultUserPassword(base.projects), ...base }, null, { fromPersonnel: true })
 }
 
-export const PERSONNEL_COLS = `code, name, role, "group", color, projects, enabled, preset,
+export const PERSONNEL_COLS = `code, name, role, "group", color, day_rate, projects, enabled, preset,
   status, applied_at, reviewed_by, reviewed_at, review_note`
-const PERSONNEL_SELECT = `p.code, p.name, p.role, r.name AS role_name, p."group", p.color, p.projects, p.enabled, p.preset,
-  p.status, p.applied_at, p.reviewed_by, p.reviewed_at, p.review_note`
+const PERSONNEL_SELECT = `p.code, p.name, p.role, r.name AS role_name, p."group", p.color, p.day_rate, p.projects,
+  p.enabled, p.preset, p.status, p.applied_at, p.reviewed_by, p.reviewed_at, p.review_note`
 export const listPersonnel = (scope) => {
   let where = '', params = []
   if (scope !== null && scope !== undefined) {
@@ -276,10 +277,10 @@ export async function createPersonnel(b, req, options = {}) {
   const status = b.status ?? '已生效'
   try {
     const { rows } = await pool.query(
-      `INSERT INTO personnel(code, name, role, "group", color, projects, enabled, preset, status, applied_at)
-       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,true),COALESCE($8,false),$9,$10)
+      `INSERT INTO personnel(code, name, role, "group", color, day_rate, projects, enabled, preset, status, applied_at)
+       VALUES ($1,$2,$3,$4,$5,COALESCE($6,0),$7,COALESCE($8,true),COALESCE($9,false),$10,$11)
        RETURNING ${PERSONNEL_COLS}`,
-      [b.code, b.name, b.role, b.group, b.color, JSON.stringify(projects),
+      [b.code, b.name, b.role, b.group, b.color, b.day_rate, JSON.stringify(projects),
         b.enabled, b.preset, status, b.applied_at ?? null],
     )
     // 注册申请只写人员档案，待审核通过后才下推用户账号。
@@ -312,10 +313,10 @@ export async function updatePersonnel(code, b, req) {
   const projects = b.projects === undefined ? null : JSON.stringify(await validateProjects(normalizeProjects(b.projects)))
   const { rows } = await pool.query(
     `UPDATE personnel SET name=COALESCE($2,name), role=COALESCE($3,role), "group"=COALESCE($4,"group"),
-       color=COALESCE($5,color), projects=COALESCE($6,projects), enabled=COALESCE($7,enabled),
-       preset=COALESCE($8,preset)
+       color=COALESCE($5,color), day_rate=COALESCE($6,day_rate), projects=COALESCE($7,projects),
+       enabled=COALESCE($8,enabled), preset=COALESCE($9,preset)
      WHERE code=$1 RETURNING ${PERSONNEL_COLS}`,
-    [code, b.name, b.role, b.group, b.color, projects, b.enabled, b.preset],
+    [code, b.name, b.role, b.group, b.color, b.day_rate, projects, b.enabled, b.preset],
   )
   if (!rows.length) throw new HttpError(404, ERR.NOT_FOUND, '人员不存在')
   // 未生效的注册记录不触发账号下推，审核接口是唯一生成用户的入口。
@@ -642,7 +643,7 @@ export async function removeUser(id) {
 }
 
 // ---------- 自定义字段 / 必填字段 ----------
-const CUSTOM_COLS = 'key, label, type, enabled, preset, projects'
+const CUSTOM_COLS = 'key, label, type, module, enabled, preset, projects'
 export const listCustomFields = (scope) => {
   const s = scopeClause(scope, 1)
   return pool.query(`SELECT ${CUSTOM_COLS} FROM custom_fields WHERE true${s.clause} ORDER BY key`, s.params).then((r) => r.rows)
@@ -651,18 +652,22 @@ export async function createCustomField(b) {
   const max = await pool.query(`SELECT COALESCE(max(substring(key from '\\d+')::int),0) AS m FROM custom_fields WHERE key ~ '^cf_\\d+$'`)
   const key = `cf_${max.rows[0].m + 1}`
   const projects = await validateProjects(normalizeProjects(b.projects))
+  const module = b.module === 'plan' ? 'plan' : 'issue'
   const { rows } = await pool.query(
-    `INSERT INTO custom_fields(key, label, type, enabled, preset, projects) VALUES ($1,$2,$3,COALESCE($4,true),COALESCE($5,false),$6::text[])
+    `INSERT INTO custom_fields(key, label, type, module, enabled, preset, projects)
+     VALUES ($1,$2,$3,$4,COALESCE($5,true),COALESCE($6,false),$7::text[])
      RETURNING ${CUSTOM_COLS}`,
-    [key, b.label, b.type, b.enabled, b.preset, projects])
+    [key, b.label, b.type, module, b.enabled, b.preset, projects])
   return rows[0]
 }
 export async function updateCustomField(key, b) {
   const projects = b.projects === undefined ? null : await validateProjects(normalizeProjects(b.projects))
+  const module = b.module === undefined ? null : (b.module === 'plan' ? 'plan' : 'issue')
   const { rows } = await pool.query(
-    `UPDATE custom_fields SET label=COALESCE($2,label), type=COALESCE($3,type), enabled=COALESCE($4,enabled),
-       preset=COALESCE($5,preset), projects=COALESCE($6::text[],projects) WHERE key=$1 RETURNING ${CUSTOM_COLS}`,
-    [key, b.label, b.type, b.enabled, b.preset, projects])
+    `UPDATE custom_fields SET label=COALESCE($2,label), type=COALESCE($3,type), module=COALESCE($4,module),
+       enabled=COALESCE($5,enabled), preset=COALESCE($6,preset), projects=COALESCE($7::text[],projects)
+     WHERE key=$1 RETURNING ${CUSTOM_COLS}`,
+    [key, b.label, b.type, module, b.enabled, b.preset, projects])
   if (!rows.length) throw new HttpError(404, ERR.NOT_FOUND, '自定义字段不存在')
   return rows[0]
 }
@@ -671,17 +676,22 @@ export async function removeCustomField(key) {
   if (!r.rowCount) throw new HttpError(404, ERR.NOT_FOUND, '自定义字段不存在')
 }
 
-// 必填规则：每条含 field_key + projects（空数组=全局必填）。GET 返回字符串数组供表单校验
-export async function getRequiredFields(project) {
+// 必填规则：每条含 field_key + projects（空数组=全局必填），按 module 区分问题跟踪与项目计划
+const normalizeFieldModule = (module) => (module === 'plan' ? 'plan' : 'issue')
+export async function getRequiredFields(project, module = 'issue') {
+  const m = normalizeFieldModule(module)
   const sql = project
-    ? `SELECT field_key FROM required_fields WHERE cardinality(projects)=0 OR projects && $1::text[] ORDER BY field_key`
-    : `SELECT field_key FROM required_fields ORDER BY field_key`
-  const { rows } = await pool.query(sql, project ? [[project]] : [])
+    ? `SELECT field_key FROM required_fields WHERE module=$2
+       AND (cardinality(projects)=0 OR projects && $1::text[]) ORDER BY field_key`
+    : `SELECT field_key FROM required_fields WHERE module=$1 ORDER BY field_key`
+  const { rows } = await pool.query(sql, project ? [[project], m] : [m])
   return rows.map((x) => x.field_key)
 }
 // 配置界面读取规则：受限用户仅看到自己可见的项目部分；全局规则保持空数组（只读）
-export async function getRequiredFieldRules(scope) {
-  const { rows } = await pool.query('SELECT field_key, projects FROM required_fields ORDER BY field_key')
+export async function getRequiredFieldRules(scope, module = 'issue') {
+  const m = normalizeFieldModule(module)
+  const { rows } = await pool.query(
+    'SELECT field_key, projects FROM required_fields WHERE module=$1 ORDER BY field_key', [m])
   if (scope === null || scope === undefined) return rows
   const result = []
   for (const r of rows) {
@@ -695,8 +705,9 @@ export async function getRequiredFieldRules(scope) {
   }
   return result
 }
-export async function putRequiredFields(fields, req, project) {
+export async function putRequiredFields(fields, req, project, module = 'issue') {
   // fields: [{ field_key }]；project 有值时只维护该项目的必填标记，其余规则保持原样
+  const m = normalizeFieldModule(module)
   const scope = req?.scope ?? null
   if (project === 'ALL') throw new HttpError(400, ERR.VALIDATION, '项目过滤不支持 ALL，请使用全局配置')
   if (project) {
@@ -706,7 +717,8 @@ export async function putRequiredFields(fields, req, project) {
     throw new HttpError(403, ERR.SCOPE, '受限用户请在项目过滤下维护必填字段')
   }
 
-  const { rows: existingRows } = await pool.query('SELECT field_key, projects FROM required_fields')
+  const { rows: existingRows } = await pool.query(
+    'SELECT field_key, projects FROM required_fields WHERE module=$1', [m])
   const existing = new Map(existingRows.map((r) => [r.field_key, r.projects || []]))
   const submitted = new Set((fields || []).map((f) => String(f.field_key)))
 
@@ -740,9 +752,12 @@ export async function putRequiredFields(fields, req, project) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query('DELETE FROM required_fields')
+    await client.query('DELETE FROM required_fields WHERE module=$1', [m])
     for (const [fieldKey, projects] of final) {
-      await client.query('INSERT INTO required_fields(field_key, projects) VALUES ($1,$2::text[]) ON CONFLICT (field_key) DO UPDATE SET projects=EXCLUDED.projects', [fieldKey, projects])
+      await client.query(
+        `INSERT INTO required_fields(module, field_key, projects) VALUES ($1,$2,$3::text[])
+         ON CONFLICT (module, field_key) DO UPDATE SET projects=EXCLUDED.projects`,
+        [m, fieldKey, projects])
     }
     await client.query('COMMIT')
   } catch (e) {
@@ -751,7 +766,7 @@ export async function putRequiredFields(fields, req, project) {
   } finally {
     client.release()
   }
-  return getRequiredFieldRules(scope)
+  return getRequiredFieldRules(scope, m)
 }
 
 // ---------- 通知类型 / 待办优先级 / 预警规则 ----------

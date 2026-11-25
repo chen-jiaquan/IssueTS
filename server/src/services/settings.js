@@ -7,6 +7,10 @@ import { isSystemAdminRole } from '../middleware/scope.js'
 // 读取优先级：匹配项目 > ALL > 全局(空数组) > app_meta > 默认值。
 export const ISSUE_EXPORT_LIMIT_KEY = 'issue_export_limit'
 export const DEFAULT_ISSUE_EXPORT_LIMIT = 0 // 0=不限制
+export const PLAN_EXPORT_LIMIT_KEY = 'plan_export_limit'
+export const DEFAULT_PLAN_EXPORT_LIMIT = 0 // 0=不限制
+export const REPORT_EXPORT_LIMIT_KEY = 'report_export_limit'
+export const DEFAULT_REPORT_EXPORT_LIMIT = 0 // 0=不限制
 export const DEFAULT_USER_PASSWORD_KEY = 'default_user_password'
 export const DEFAULT_USER_PASSWORD = 'Issue@2026' // 人员下推用户时的初始密码（可在系统设置修改）
 export const TODO_DUE_DAYS_KEY = 'todo_due_days'
@@ -124,6 +128,14 @@ export async function getIssueExportLimit(projects, scope, req) {
   return resolveValue(ISSUE_EXPORT_LIMIT_KEY, projects, DEFAULT_ISSUE_EXPORT_LIMIT, parseLimit, scope, req)
 }
 
+export async function getPlanExportLimit(projects, scope, req) {
+  return resolveValue(PLAN_EXPORT_LIMIT_KEY, projects, DEFAULT_PLAN_EXPORT_LIMIT, parseLimit, scope, req)
+}
+
+export async function getReportExportLimit(projects, scope, req) {
+  return resolveValue(REPORT_EXPORT_LIMIT_KEY, projects, DEFAULT_REPORT_EXPORT_LIMIT, parseLimit, scope, req)
+}
+
 export async function getDefaultUserPassword(projects, scope, req) {
   return resolveValue(DEFAULT_USER_PASSWORD_KEY, projects, DEFAULT_USER_PASSWORD, parsePassword, scope, req)
 }
@@ -189,6 +201,12 @@ async function upsertSetting(req, key, value, projects, id) {
 
 export const setIssueExportLimit = (value, { projects, id, req } = {}) =>
   upsertSetting(req, ISSUE_EXPORT_LIMIT_KEY, value, projects, id)
+
+export const setPlanExportLimit = (value, { projects, id, req } = {}) =>
+  upsertSetting(req, PLAN_EXPORT_LIMIT_KEY, value, projects, id)
+
+export const setReportExportLimit = (value, { projects, id, req } = {}) =>
+  upsertSetting(req, REPORT_EXPORT_LIMIT_KEY, value, projects, id)
 
 export const setDefaultUserPassword = (value, { projects, id, req } = {}) =>
   upsertSetting(req, DEFAULT_USER_PASSWORD_KEY, value, projects, id)

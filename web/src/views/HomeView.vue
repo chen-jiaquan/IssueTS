@@ -91,9 +91,32 @@ const aggTodos = ref([])
 const aggTab = ref('问题')
 const aggGroups = computed(() => {
   const g = { 问题: [], 计划: [], 手工: [] }
-  for (const r of aggTodos.value) (g[r.type] ?? g.手工).push(r)
+  for (const r of aggTodos.value) {
+    // 手工页签改用完整待办数据，跳过原本会落入手工页签的受限待办记录
+    if (r.source === 'todo' && r.type !== '问题' && r.type !== '计划') continue
+    const bucket = g[r.type] ?? g.手工
+    bucket.push(r)
+  }
+  // 首页手工页签不设截止日期/状态限制，展示全部手工待办；列表页仍使用聚合口径
+  g.手工 = todos.value
+    .filter((t) => t.type !== '问题' && t.type !== '计划')
+    .map((t) => ({
+      source: 'todo',
+      type: t.type,
+      ref: t.id,
+      ref_no: t.id,
+      title: t.text,
+      owner: t.owner,
+      start_date: t.start_date,
+      due_date: t.due || t.start_date,
+      status: t.done ? '关闭' : '未开始',
+      projects: t.projects || [],
+      prio: t.prio,
+    }))
   return g
 })
+const activeAggCount = (type) => aggGroups.value[type]
+  .filter((a) => !(a.source === 'todo' && a.status === '关闭')).length
 
 let statsSeq = 0
 async function loadStats() {
@@ -166,7 +189,7 @@ async function removeNotice(row) {
 // ---------- 待办 ----------
 const todoDialog = ref(false)
 const editingTodo = ref(null)
-const todoForm = reactive({ text: '', projects: [], owner: '', start_date: '', due: '', prio: 'M', type: '手工', done: false })
+const todoForm = reactive({ text: '', projects: [], owner: '', start_date: '', due: '', completed_at: '', prio: 'M', type: '手工', done: false })
 const TODO_TYPE_FALLBACK = ['问题', '计划', '手工']
 const todoTypes = ref([])
 
@@ -176,12 +199,12 @@ function openTodo(row = null) {
     ? {
       text: row.text, projects: row.projects || [], owner: row.owner || '',
       start_date: fmtDate(row.start_date),
-      due: fmtDate(row.due), prio: row.prio || 'M',
+      due: fmtDate(row.due), completed_at: fmtDate(row.completed_at), prio: row.prio || 'M',
       type: row.type || '手工', done: row.done,
     }
     : {
       text: '', projects: [...filter.project], owner: auth.user?.person || '',
-      start_date: '', due: '', prio: 'M', type: '手工', done: false,
+      start_date: '', due: '', completed_at: '', prio: 'M', type: '手工', done: false,
     })
   todoDialog.value = true
 }
@@ -258,6 +281,7 @@ onMounted(async () => {
       <span class="brand">问题跟踪系统</span>
       <div class="nav">
         <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="router.push('/plan')">项目计划</el-button>
+        <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="router.push('/load-matrix')">负载矩阵</el-button>
         <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="goIssues()">问题跟踪</el-button>
         <el-button v-if="auth.has('ISSUE_VIEW')" size="small" @click="router.push('/stats')">统计报表</el-button>
         <el-button v-if="canArchives" size="small" @click="router.push('/archives')">基础档案设置</el-button>
@@ -392,14 +416,14 @@ onMounted(async () => {
         </template>
         <el-tabs v-model="aggTab" class="todo-tabs">
           <el-tab-pane v-for="t in ['问题', '计划', '手工']" :key="t" :name="t">
-            <template #label>{{ t }}（{{ aggGroups[t].length }}）</template>
+            <template #label>{{ t }}（{{ activeAggCount(t) }}）</template>
             <CollapsibleList :items="aggGroups[t]" :limit="6" empty-text="暂无待办">
               <template #item="{ item: a }">
                 <div class="todo-item">
                   <el-checkbox v-if="a.source === 'todo'" :model-value="a.status !== '关闭'" :disabled="!auth.has('DASH_TODO')" @change="toggleAggregateTodo(a, $event)" />
                   <span v-else class="todo-source-dot" />
                   <div class="todo-main">
-                    <div class="todo-text">{{ a.title }}</div>
+                    <div class="todo-text" :class="{ done: a.source === 'todo' && a.status === '关闭' }">{{ a.title }}</div>
                     <div class="todo-meta">
                       <el-tag v-if="a.ref_no" size="small" type="info" effect="plain">编号 {{ a.ref_no }}</el-tag>
                       <el-tag v-if="a.prio" size="small" :type="PRIO[a.prio] || 'info'" effect="plain">{{ PRIO_LABEL[a.prio] || a.prio }}</el-tag>
@@ -407,6 +431,7 @@ onMounted(async () => {
                       <el-tag v-for="p in (a.projects || [])" :key="p" size="small" effect="plain">{{ p }}</el-tag>
                       <span v-if="a.owner"> · {{ a.owner }}</span>
                       <span v-if="a.due_date"> · 截止 {{ fmtDate(a.due_date) }}</span>
+                      <span v-if="a.source === 'todo' && findTodo(a.ref)?.completed_at"> · 完成 {{ fmtDate(findTodo(a.ref).completed_at) }}</span>
                     </div>
                   </div>
                   <div class="todo-ops">
@@ -474,6 +499,10 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-form-item label="已完成"><el-switch v-model="todoForm.done" /></el-form-item>
+        <el-form-item label="实际完成">
+          <el-date-picker v-model="todoForm.completed_at" type="date" value-format="YYYY-MM-DD"
+            style="width:100%" disabled placeholder="勾选完成后自动填写当天日期" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="todoDialog = false">取消</el-button>
@@ -516,7 +545,7 @@ onMounted(async () => {
 .notice-content { font-size: 13px; margin-top: 4px; color: var(--el-text-color-regular); }
 .notice-ops { white-space: nowrap; }
 .todo-item { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px dashed var(--el-border-color-lighter); }
-.todo-item.done .todo-text { text-decoration: line-through; color: var(--el-text-color-disabled); }
+.todo-item.done .todo-text, .todo-text.done { text-decoration: line-through; color: var(--el-text-color-disabled); }
 .todo-main { flex: 1; }
 .todo-text { font-size: 13px; }
 .todo-meta { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 2px; }

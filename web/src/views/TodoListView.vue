@@ -36,15 +36,47 @@ function fmtDate(v) {
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
+const isDoneManual = (r) => r.source === 'todo' && r.status === '关闭'
+// 待办列表不展示已完成的手工待办（首页手工页签不受此限制）
+const allRows = computed(() => rows.value.filter((r) => !isDoneManual(r)))
 const counts = computed(() => {
-  const c = { 全部: rows.value.length, 问题: 0, 计划: 0, 手工: 0 }
-  for (const r of rows.value) if (c[r.type] !== undefined) c[r.type] += 1
+  const c = { 全部: allRows.value.length, 问题: 0, 计划: 0, 手工: 0 }
+  for (const r of allRows.value) if (c[r.type] !== undefined) c[r.type] += 1
   return c
 })
 const visibleRows = computed(() => activeType.value === '全部'
-  ? rows.value
-  : rows.value.filter((r) => r.type === activeType.value))
+  ? allRows.value
+  : allRows.value.filter((r) => r.type === activeType.value))
 const isOverdue = (r) => r.due_date && new Date(fmtDate(r.due_date)) < new Date(new Date().toDateString())
+const EMPTY_FILTER = '__EMPTY__'
+const isEmptyValue = (v) => v === null || v === undefined || v === ''
+const fieldValue = {
+  type: (r) => r.type || null,
+  refNo: (r) => r.ref_no || '—',
+  source: (r) => (r.source ? (SOURCE_LABEL[r.source] || r.source) : null),
+  title: (r) => r.title || null,
+  owner: (r) => r.owner || null,
+  project: (r) => (r.projects || []).join('、') || '全员',
+  startDate: (r) => fmtDate(r.start_date) || '—',
+  dueDate: (r) => fmtDate(r.due_date) || '—',
+  status: (r) => r.status || null,
+}
+// 列筛选项只从当前列表数据中提取；空值作为「（空）」选项排在最后
+const columnFilters = computed(() => Object.fromEntries(Object.entries(fieldValue).map(([key, get]) => {
+  const values = visibleRows.value.map(get)
+  const options = [...new Set(values.filter((v) => !isEmptyValue(v)))]
+    .sort((a, b) => String(a).localeCompare(String(b)))
+    .map((value) => ({ text: String(value), value }))
+  if (values.some(isEmptyValue)) options.push({ text: '（空）', value: EMPTY_FILTER })
+  return [key, options]
+})))
+const filterBy = (key) => (value, row) => {
+  const raw = fieldValue[key](row)
+  const selected = Array.isArray(value) ? value : [value]
+  return selected.some((v) => v === EMPTY_FILTER
+    ? isEmptyValue(raw)
+    : String(raw) === String(v))
+}
 
 async function load() {
   loading.value = true
@@ -131,29 +163,29 @@ onMounted(async () => {
         </el-tab-pane>
       </el-tabs>
       <el-table :data="visibleRows" size="small" stripe border max-height="calc(100vh - 250px)">
-        <el-table-column label="待办类型" width="88">
+        <el-table-column label="待办类型" width="88" column-key="type" :filters="columnFilters.type" :filter-method="filterBy('type')">
           <template #default="{ row }"><el-tag size="small" effect="plain">{{ row.type }}</el-tag></template>
         </el-table-column>
-        <el-table-column label="编号" width="88">
+        <el-table-column label="编号" width="88" column-key="refNo" :filters="columnFilters.refNo" :filter-method="filterBy('refNo')">
           <template #default="{ row }">{{ row.ref_no || '—' }}</template>
         </el-table-column>
-        <el-table-column label="来源" width="96">
+        <el-table-column label="来源" width="96" column-key="source" :filters="columnFilters.source" :filter-method="filterBy('source')">
           <template #default="{ row }">{{ SOURCE_LABEL[row.source] || row.source }}</template>
         </el-table-column>
-        <el-table-column label="事项" min-width="240" show-overflow-tooltip prop="title" />
-        <el-table-column label="负责人" width="104" prop="owner" />
-        <el-table-column label="项目" width="120">
+        <el-table-column label="事项" min-width="240" show-overflow-tooltip prop="title" column-key="title" :filters="columnFilters.title" :filter-method="filterBy('title')" />
+        <el-table-column label="负责人" width="104" prop="owner" column-key="owner" :filters="columnFilters.owner" :filter-method="filterBy('owner')" />
+        <el-table-column label="项目" width="120" column-key="project" :filters="columnFilters.project" :filter-method="filterBy('project')">
           <template #default="{ row }">{{ (row.projects || []).join('、') || '全员' }}</template>
         </el-table-column>
-        <el-table-column label="开始时间" width="110">
+        <el-table-column label="开始时间" width="110" column-key="startDate" :filters="columnFilters.startDate" :filter-method="filterBy('startDate')">
           <template #default="{ row }">{{ fmtDate(row.start_date) || '—' }}</template>
         </el-table-column>
-        <el-table-column label="截止日期" width="110">
+        <el-table-column label="截止日期" width="110" column-key="dueDate" :filters="columnFilters.dueDate" :filter-method="filterBy('dueDate')">
           <template #default="{ row }">
             <span :class="{ overdue: isOverdue(row) }">{{ fmtDate(row.due_date) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="96" prop="status" />
+        <el-table-column label="状态" width="96" prop="status" column-key="status" :filters="columnFilters.status" :filter-method="filterBy('status')" />
         <el-table-column label="操作" width="80" fixed="right">
           <template #default="{ row }">
             <el-button v-if="row.source !== 'todo' && auth.has('ISSUE_VIEW')" link size="small" @click="openRow(row)">查看</el-button>

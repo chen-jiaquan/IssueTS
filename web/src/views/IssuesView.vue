@@ -32,7 +32,7 @@ const personOptionsFor = (project) => {
     .filter((p) => Array.isArray(p.projects) && (p.projects.includes('ALL') || p.projects.includes(project)))
     .map((p) => p.name)
 }
-const customFields = computed(() => meta.value.customFields ?? [])
+const customFields = computed(() => (meta.value.customFields ?? []).filter((f) => f.module !== 'plan'))
 const isCustomField = (key) => String(key).startsWith('cf_') && customFields.value.some((f) => f.key === key)
 const fieldLabel = (key) =>
   meta.value.fields.find((f) => f.key === key)?.label
@@ -72,8 +72,8 @@ const query = reactive({ page: 1, pageSize: 50, q: '', ...blankFilters() })
 // 下钻提示（值已并入 query，extra 仅用于展示提示条）
 const extra = reactive({ developer: '', module: '', type: '', overdue: '', drill: '', person: '' })
 const selected = ref([])
-// 表格锁定：'' 不锁定 / 'header' 仅锁定表头 / 'both' 表头+左右列都锁定（偏好存本地）
-const lockMode = ref(localStorage.getItem('issue_lock_mode') ?? '')
+// 表格锁定：'' 不锁定 / 'header' 仅锁定表头 / 'both' 表头+左右列都锁定（默认行列锁定，偏好存本地）
+const lockMode = ref(localStorage.getItem('issue_lock_mode') ?? 'both')
 const TABLE_MAX_HEIGHT = 'calc(100vh - 180px)'
 const leftFixed = computed(() => (lockMode.value === 'both' ? 'left' : undefined))
 // 锁定行列时固定前 5 个数据列（项目/阶段/类型/模块/需求描述），加上多选、序号共固定前 7 列

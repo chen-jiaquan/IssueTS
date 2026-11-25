@@ -59,7 +59,9 @@ const codeName = (codeMax = 32) => [
   enabledRule, presetRule,
 ]
 
-export const projectRules = codeName(32)
+export const projectRules = [...codeName(32),
+  body('contract_man_days').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('合同人天须为非负数字'),
+]
 export const productRules = [...codeName(32), projectsRule().optional()]
 
 // 登录页项目申请（公开提交）与管理员审核
@@ -81,6 +83,7 @@ export const personnelRules = (partial = false) => [
   body('role').optional({ nullable: true }).isString(),
   body('group').optional({ nullable: true }).isString(),
   body('color').optional({ nullable: true }).isString(),
+  body('day_rate').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('个人天单价须为非负金额'),
   body('projects').optional().isArray().withMessage('所属项目须为数组'),
   body('projects.*').isString().trim().notEmpty().withMessage('所属项目编码非法'),
   enabledRule, presetRule,
@@ -105,6 +108,8 @@ export const customFieldRules = (partial = false) => [
   body('label').optional().isString().notEmpty(),
   body('type').if(() => !partial).isIn(['text', 'textarea', 'number', 'date']).withMessage('类型非法'),
   body('type').optional().isIn(['text', 'textarea', 'number', 'date']),
+  body('module').if(() => !partial).isIn(['issue', 'plan']).withMessage('所属类型非法'),
+  body('module').optional().isIn(['issue', 'plan']).withMessage('所属类型非法'),
   projectsRule().optional(), enabledRule, presetRule,
 ]
 

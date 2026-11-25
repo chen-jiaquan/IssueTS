@@ -14,7 +14,7 @@ import {
   dictItemRules, customFieldRules, noticeTypeRules, todoPrioRules,
   alertRulePutRules, rolePermPutRules, requiredFieldsPutRules,
 } from '../schemas/archives.js'
-import { ok } from '../utils/resp.js'
+import { ok, HttpError, ERR } from '../utils/resp.js'
 
 const router = Router()
 router.use(authRequired, loadProfile, attachScope)
@@ -40,6 +40,13 @@ const P = {
   SECURITY_ALERTS: ['DASH_ALERT', 'SECURITY_TAB_ALERTS'],
 }
 const idOf = (req) => req.params.id
+const fieldModuleOf = (req) => {
+  const m = req.query.module ?? 'issue'
+  if (m !== 'issue' && m !== 'plan') {
+    throw new HttpError(400, ERR.VALIDATION, '所属类型须为 issue 或 plan')
+  }
+  return m
+}
 const checkBodyProjects = (req, _res, next) => {
   try { assertProjectsEditable(req, req.body?.projects); next() } catch (e) { next(e) }
 }
@@ -121,10 +128,10 @@ router.post('/custom-fields', guard(P.ARCHIVE_CUSTOM), customFieldRules(false), 
 router.put('/custom-fields/:id', guard(P.ARCHIVE_CUSTOM), customFieldRules(true), validate, checkBodyProjects, asyncHandler(async (req, res) => ok(res, await S.updateCustomField(req.params.id, req.body))))
 router.delete('/custom-fields/:id', guard(P.ARCHIVE_CUSTOM), asyncHandler(async (req, res) => { await S.removeCustomField(req.params.id); ok(res) }))
 
-router.get('/required-fields', asyncHandler(async (req, res) => ok(res, await S.getRequiredFields(req.query.project))))
-router.get('/required-fields/rules', guard(P.ARCHIVE_REQUIRED), asyncHandler(async (req, res) => ok(res, await S.getRequiredFieldRules(req.scope))))
+router.get('/required-fields', asyncHandler(async (req, res) => ok(res, await S.getRequiredFields(req.query.project, fieldModuleOf(req)))))
+router.get('/required-fields/rules', guard(P.ARCHIVE_REQUIRED), asyncHandler(async (req, res) => ok(res, await S.getRequiredFieldRules(req.scope, fieldModuleOf(req)))))
 router.put('/required-fields', guard(P.ARCHIVE_REQUIRED), requiredFieldsPutRules, validate, asyncHandler(async (req, res) =>
-  ok(res, await S.putRequiredFields(req.body.fields, req, req.query.project))))
+  ok(res, await S.putRequiredFields(req.body.fields, req, req.query.project, fieldModuleOf(req)))))
 
 // ---------- 通知类型 / 待办优先级 ----------
 router.get('/notice-types', attachScope, asyncHandler(async (req, res) => ok(res, await S.listNoticeTypes(req.scope))))

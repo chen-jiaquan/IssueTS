@@ -27,6 +27,10 @@ const routes = [
     meta: { perms: ['ISSUE_VIEW'] },
   },
   {
+    path: '/load-matrix', name: 'load-matrix', component: () => import('@/views/LoadMatrixView.vue'),
+    meta: { perms: ['ISSUE_VIEW'] },
+  },
+  {
     path: '/security', name: 'security', component: () => import('@/views/SecurityView.vue'),
     meta: { perms: SECURITY_ENTRY_PERMS },
   },
