@@ -223,6 +223,14 @@ function removeAggregateTodo(row) {
 
 // ---------- 跳转 ----------
 const goIssues = (query = {}) => router.push({ path: '/issues', query })
+// 与待办清单页一致：带编号跳转，目标页加载后定位并高亮对应行
+function locateAggregate(row) {
+  if (row.source === 'issue') {
+    router.push({ path: '/issues', query: { seq: row.ref_no, project: row.projects?.[0] || '', locate: '1' } })
+  } else if (row.source === 'plan') {
+    router.push({ path: '/plan', query: { project: row.projects?.[0] || '', wbs: row.ref_no, id: row.ref } })
+  }
+}
 
 async function doLogout() {
   await auth.logout()
@@ -393,6 +401,7 @@ onMounted(async () => {
                   <div class="todo-main">
                     <div class="todo-text">{{ a.title }}</div>
                     <div class="todo-meta">
+                      <el-tag v-if="a.ref_no" size="small" type="info" effect="plain">编号 {{ a.ref_no }}</el-tag>
                       <el-tag v-if="a.prio" size="small" :type="PRIO[a.prio] || 'info'" effect="plain">{{ PRIO_LABEL[a.prio] || a.prio }}</el-tag>
                       <el-tag v-if="a.source !== 'todo'" size="small" effect="plain">{{ a.status }}</el-tag>
                       <el-tag v-for="p in (a.projects || [])" :key="p" size="small" effect="plain">{{ p }}</el-tag>
@@ -405,7 +414,7 @@ onMounted(async () => {
                       <el-button link size="small" @click="editAggregateTodo(a)">编辑</el-button>
                       <el-button link size="small" type="danger" @click="removeAggregateTodo(a)">删除</el-button>
                     </template>
-                    <el-button v-else-if="a.source !== 'todo'" link size="small" @click="a.source === 'issue' ? goIssues() : router.push('/plan')">查看</el-button>
+                    <el-button v-else-if="a.source !== 'todo' && auth.has('ISSUE_VIEW')" link size="small" @click="locateAggregate(a)">查看</el-button>
                   </div>
                 </div>
               </template>

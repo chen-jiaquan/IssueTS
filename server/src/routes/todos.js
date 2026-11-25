@@ -12,11 +12,11 @@ import { ok } from '../utils/resp.js'
 const router = Router()
 router.use(authRequired, loadProfile, attachScope)
 
-router.get('/', hasPerm('DASH_VIEW'), asyncHandler(async (req, res) => ok(res, await H.listTodos(req.scope))))
+router.get('/', hasPerm('DASH_VIEW'), asyncHandler(async (req, res) => ok(res, await H.listTodos(req.scope, req.profile))))
 
 // 聚合待办：问题 + 项目计划 + 手工待办，按类型分类，截止日期在未来一周内（含逾期）
 router.get('/aggregate', hasPerm('DASH_VIEW'), aggregateTodoQuery, validate,
-  asyncHandler(async (req, res) => ok(res, await H.listAggregatedTodos(req.scope, req.query))))
+  asyncHandler(async (req, res) => ok(res, await H.listAggregatedTodos(req.scope, req.query, req.profile))))
 
 router.post('/', hasPerm('DASH_TODO'), todoBody, validate,
   asyncHandler(async (req, res) => {

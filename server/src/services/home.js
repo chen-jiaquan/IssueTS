@@ -1,12 +1,18 @@
 // 首页工作台服务（见 docs/API契约.md 第 4 节）：KPI / 预警 / 通知 / 待办
 import { pool } from '../db/pool.js'
 import { HttpError, ERR } from '../utils/resp.js'
+import { getTodoRulesMap } from './settings.js'
 
 const csvValues = (v) => (Array.isArray(v) ? v : String(v ?? '').split(','))
   .map((s) => String(s).trim()).filter(Boolean)
 
+// 全项目角色（管理员/项目经理，含显式配置全部项目的情况）看项目内全部人员；
+// 其他人员只看与自己相关的记录。
+function isPersonScoped(profile, scope) {
+  return !!profile?.person && scope !== null && !profile.perms.includes('PROJECT_ALL')
+}
+
 // 首页统计的公共过滤：可见项目范围 + 所选项目 + 本人负责/开发/提交的问题
-// 全项目角色（管理员/项目经理，含显式配置全部项目的情况）保留全量口径
 function buildWhere(scope, filters = {}, alias = 'i', profile = null) {
   const clauses = []
   const params = []
@@ -19,7 +25,7 @@ function buildWhere(scope, filters = {}, alias = 'i', profile = null) {
     params.push(projects)
     clauses.push(`${alias}.project = ANY($${params.length})`)
   }
-  const personActive = !!profile?.person && scope !== null && !profile.perms.includes('PROJECT_ALL')
+  const personActive = isPersonScoped(profile, scope)
   if (personActive) {
     const idx = params.push(profile.person)
     clauses.push(`(${alias}.owner = $${idx} OR ${alias}.developer = $${idx} OR ${alias}.reporter = $${idx})`)
@@ -200,52 +206,85 @@ export async function getTodoProjects(id) {
   return rows[0].projects || []
 }
 
-export async function listTodos(scope) {
+export async function listTodos(scope, profile = null) {
+  const personScoped = isPersonScoped(profile, scope)
+  const params = scope ? [scope] : []
+  if (personScoped) params.push(profile.person)
   const { rows } = await pool.query(
     `SELECT id, text, projects, owner, start_date, due, prio, type, done, created_at FROM todos
      WHERE ${scope ? `(cardinality(projects) = 0 OR projects && $1::text[])` : 'TRUE'}
-     ORDER BY done, prio, due NULLS LAST, id`, scope ? [scope] : [])
+       ${personScoped ? `AND (owner = $${params.length} OR owner IS NULL)` : ''}
+     ORDER BY done, prio, due NULLS LAST, id`, params)
   return rows
 }
 
 // 聚合待办：问题（plan_end）+ 项目计划（end_date）+ 手工待办（due/start_date）
 // 规则：截止日期不晚于今天起一周（含逾期）、未完成，按待办类型分类。
-export async function listAggregatedTodos(scope, filters = {}) {
+export async function listAggregatedTodos(scope, filters = {}, profile = null) {
   const owner = filters.owner || null
   const type = filters.type || null
-  const params = [scope, owner, type]
+  const project = filters.project || null
+  // 项目经理/ALL 角色看项目内全部人员；其他人员只看与自己相关的记录
+  const person = isPersonScoped(profile, scope) ? profile.person : null
+  const codes = project ? [project]
+    : (scope || (await pool.query('SELECT code FROM projects')).rows.map((r) => r.code))
+  const rules = await getTodoRulesMap(codes)
+  const params = [scope, owner, type, project, person,
+    JSON.stringify(rules.days), JSON.stringify(rules.statuses)]
   const { rows } = await pool.query(`
     WITH agg AS (
       SELECT 'issue'::text AS source, '问题'::text AS type, i.id::text AS ref,
-             i."desc"::text AS title, i.owner::text AS owner, i.plan_end AS due_date,
+             i.seq::text AS ref_no, i."desc"::text AS title, i.owner::text AS owner,
+             i.plan_start AS start_date, i.plan_end AS due_date,
              i.status::text AS status, ARRAY[i.project]::text[] AS projects, i.priority AS prio
       FROM issues i
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(($6::jsonb ->> i.project)::int, ($6::jsonb ->> '*')::int, 7) AS days,
+               COALESCE($7::jsonb -> i.project, $7::jsonb -> '*')::jsonb AS statuses
+      ) cfg
       WHERE ($1::text[] IS NULL OR i.project = ANY($1::text[]))
         AND ($2::text IS NULL OR i.owner = $2)
-        AND i.plan_end IS NOT NULL AND i.plan_end <= CURRENT_DATE + 7
-        AND i.status NOT IN ('已解决', '关闭')
+        AND ($4::text IS NULL OR i.project = $4)
+        AND ($5::text IS NULL OR i.owner = $5 OR i.developer = $5 OR i.reporter = $5)
+        AND i.plan_end IS NOT NULL AND i.plan_end <= CURRENT_DATE + cfg.days
+        AND i.status = ANY (SELECT jsonb_array_elements_text(cfg.statuses))
 
       UNION ALL
 
-      SELECT 'plan'::text, '计划'::text, p.id::text, p.title::text, p.owner::text,
-             p.end_date, COALESCE(p.status, '未开始')::text, ARRAY[p.project]::text[], NULL::varchar
+      SELECT 'plan'::text, '计划'::text, p.id::text, p.seq_no::text, p.title::text, p.owner::text,
+             p.start_date, p.end_date, COALESCE(p.status, '未开始')::text,
+             ARRAY[p.project]::text[], NULL::varchar
       FROM project_plans p
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(($6::jsonb ->> p.project)::int, ($6::jsonb ->> '*')::int, 7) AS days,
+               COALESCE($7::jsonb -> p.project, $7::jsonb -> '*')::jsonb AS statuses
+      ) cfg
       WHERE ($1::text[] IS NULL OR p.project = ANY($1::text[]))
         AND ($2::text IS NULL OR p.owner = $2)
-        AND p.end_date IS NOT NULL AND p.end_date <= CURRENT_DATE + 7
-        AND COALESCE(p.status, '未开始') NOT IN ('已解决', '关闭')
+        AND ($4::text IS NULL OR p.project = $4)
+        AND ($5::text IS NULL OR p.owner = $5)
+        AND p.end_date IS NOT NULL AND p.end_date <= CURRENT_DATE + cfg.days
+        AND COALESCE(p.status, '未开始') = ANY (SELECT jsonb_array_elements_text(cfg.statuses))
+        AND NOT EXISTS (SELECT 1 FROM project_plans c WHERE c.parent_id = p.id)
 
       UNION ALL
 
-      SELECT 'todo'::text, t.type::text, t.id::text, t.text::text, t.owner::text,
-             COALESCE(t.due, t.start_date),
+      SELECT 'todo'::text, t.type::text, t.id::text, t.id::text, t.text::text, t.owner::text,
+             t.start_date, COALESCE(t.due, t.start_date),
              (CASE WHEN t.done THEN '关闭' ELSE '未开始' END)::text, t.projects, NULL::varchar
       FROM todos t
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(($6::jsonb ->> COALESCE(t.projects[1], '*'))::int, ($6::jsonb ->> '*')::int, 7) AS days,
+               COALESCE($7::jsonb -> COALESCE(t.projects[1], '*'), $7::jsonb -> '*')::jsonb AS statuses
+      ) cfg
       WHERE ($1::text[] IS NULL OR cardinality(t.projects) = 0 OR t.projects && $1::text[])
         AND ($2::text IS NULL OR t.owner = $2)
+        AND ($4::text IS NULL OR cardinality(t.projects) = 0 OR $4 = ANY(t.projects))
+        AND ($5::text IS NULL OR t.owner = $5 OR t.owner IS NULL)
         AND t.done = false
         AND COALESCE(t.due, t.start_date) IS NOT NULL
-        AND COALESCE(t.due, t.start_date) <= CURRENT_DATE + 7
+        AND COALESCE(t.due, t.start_date) <= CURRENT_DATE + cfg.days
+        AND (CASE WHEN t.done THEN '关闭' ELSE '未开始' END) = ANY (SELECT jsonb_array_elements_text(cfg.statuses))
     )
     SELECT * FROM agg
     WHERE ($3::text IS NULL OR type = $3)

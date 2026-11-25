@@ -181,6 +181,8 @@ function reset() {
 
 // 表头下拉筛选：EP 只负责展示勾选，实际过滤交给后端（避免只筛当前页）
 const tableRef = ref()
+const locateSeq = ref(null)
+const issueRowClass = ({ row }) => (locateSeq.value !== null && row.seq === locateSeq.value ? 'locate-row' : '')
 function onFilterChange(filters) {
   // EP 的 filter-change 以列 id 为键，需映射回字段名
   const cols = tableRef.value?.store?.states?.columns?.value || []
@@ -831,9 +833,21 @@ onMounted(async () => {
   if (qs.overdue) extra.overdue = '1'
   if (qs.person) extra.person = String(qs.person)
 
+  // 从待办清单跳转：按问题编号精确筛选，加载后定位并高亮目标行
+  const locating = qs.locate === '1' && qs.seq
+  if (locating) {
+    query.seq = [String(qs.seq)]
+    locateSeq.value = Number(qs.seq)
+  }
   await load()
   bindColumnDrag()
-  if (qs.seq) openDetail({ seq: Number(qs.seq) })
+  if (locating) {
+    await nextTick()
+    tableRef.value?.$el?.querySelector('.locate-row')?.scrollIntoView({ block: 'center' })
+    setTimeout(() => { locateSeq.value = null }, 8000)
+  } else if (qs.seq) {
+    openDetail({ seq: Number(qs.seq) })
+  }
 })
 </script>
 
@@ -927,6 +941,7 @@ onMounted(async () => {
 
     <!-- 表格 -->
     <el-table ref="tableRef" :data="list" v-loading="loading" size="small" border stripe
+      row-key="seq" :row-class-name="issueRowClass"
       :max-height="lockMode ? TABLE_MAX_HEIGHT : undefined"
       @selection-change="selected = $event" @filter-change="onFilterChange"
       @cell-click="onCellClick" @cell-dblclick="onCellDblclick">
@@ -1177,6 +1192,7 @@ h4 { margin: 16px 0 8px; }
 </style>
 
 <style>
+.el-table__body tr.locate-row > td.el-table__cell { background: color-mix(in srgb, var(--el-color-warning) 24%, var(--el-bg-color)) !important; }
 .date-filter-popover .date-filter-panel { padding: 4px; }
 .date-filter-popover .date-filter-title { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 8px; }
 .date-filter-popover .el-tree { --el-tree-node-content-height: 28px; }

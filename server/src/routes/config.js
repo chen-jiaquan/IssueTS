@@ -7,9 +7,12 @@ import { hasPerm } from '../middleware/rbac.js'
 import { validate } from '../middleware/validate.js'
 import { pool } from '../db/pool.js'
 import { ok } from '../utils/resp.js'
-import { issueExportLimitRules, defaultUserPasswordRules } from '../schemas/config.js'
+import {
+  issueExportLimitRules, defaultUserPasswordRules, todoDueDaysRules, todoStatusesRules,
+} from '../schemas/config.js'
 import {
   getIssueExportLimit, setIssueExportLimit, getDefaultUserPassword, setDefaultUserPassword,
+  getTodoDueDays, setTodoDueDays, getTodoStatuses, setTodoStatuses,
 } from '../services/settings.js'
 
 const router = Router()
@@ -77,6 +80,20 @@ router.put('/settings/default-user-password', loadProfile, attachScope, hasPerm(
   defaultUserPasswordRules, validate,
   asyncHandler(async (req, res) => ok(res,
     await setDefaultUserPassword(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
+
+// 系统设置：待办清单生成规则（完成时间窗口 + 状态白名单）
+router.get('/settings/todo-due-days', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  asyncHandler(async (req, res) => ok(res, await getTodoDueDays(req.query.project, req.scope, req))))
+router.put('/settings/todo-due-days', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  todoDueDaysRules, validate,
+  asyncHandler(async (req, res) => ok(res,
+    await setTodoDueDays(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
+router.get('/settings/todo-statuses', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  asyncHandler(async (req, res) => ok(res, await getTodoStatuses(req.query.project, req.scope, req))))
+router.put('/settings/todo-statuses', loadProfile, attachScope, hasPerm(SETTINGS_PERMS),
+  todoStatusesRules, validate,
+  asyncHandler(async (req, res) => ok(res,
+    await setTodoStatuses(req.body.value, { projects: req.body.projects, id: req.body.id, req }))))
 
 // COLS/FIELDS/字典/人员（前端渲染表单与表头的数据源，一次拉全）
 // scope=1：首页等场景只返回当前用户可见项目及对应人员

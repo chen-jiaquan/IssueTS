@@ -1,6 +1,7 @@
 <script setup>
 // 项目计划：Excel 式清单（批量新增 / 行内编辑 / 双击卡片编辑）+ 甘特条 + 工作日历
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BackHome from '@/components/BackHome.vue'
 import TrackRecords from '@/components/TrackRecords.vue'
@@ -14,6 +15,7 @@ import {
 import { calendarData } from '@/utils/statutoryHolidays'
 
 const auth = useAuthStore()
+const route = useRoute()
 const filter = reactive({ project: '' })
 const projectMeta = ref([])
 const statusOptions = ref([])
@@ -29,6 +31,8 @@ const plans = ref([])
 const rows = ref([])
 const selection = ref([])
 const leftTable = ref(null)
+const locateWbs = ref('')
+const locateId = ref('')
 const ganttScroll = ref(null)
 const planGrid = ref(null)
 const gridHeight = ref(520)
@@ -61,6 +65,9 @@ const COL_DEFS = [
   { key: 'start_date', label: '开始时间', width: 130, field: 'start_date' },
   { key: 'end_date', label: '完成时间', width: 130, field: 'end_date' },
   { key: 'predecessor', label: '前置任务', width: 180, field: 'predecessor' },
+  { key: 'actual_start_date', label: '实际开始', width: 130, field: 'actual_start_date' },
+  { key: 'actual_end_date', label: '实际完成', width: 130, field: 'actual_end_date' },
+  { key: 'completion_rate', label: '完成比例', width: 110, field: 'completion_rate' },
   { key: 'status', label: '状态', width: 106, field: 'status' },
   { key: 'note', label: '备注', minWidth: 160, field: 'note' },
   { key: 'track', label: '跟踪记录', width: 180, field: 'track' },
@@ -295,7 +302,8 @@ const tmpSeq = ref(1)
 const form = reactive({
   project: '', parent_id: '', seq_no: '', parentReady: true, title: '', category: '', status: '未开始',
   owner: '', assistant1: '', assistant2: '',
-  start_date: '', end_date: '', hours: 0, man_days: 0, sort: 0, note: '', predecessor: [], track: [],
+  start_date: '', end_date: '', actual_start_date: '', actual_end_date: '', completion_rate: 0,
+  hours: 0, man_days: 0, sort: 0, note: '', predecessor: [], track: [],
 })
 const logDialog = ref(false)
 const logList = ref([])
@@ -418,7 +426,21 @@ const rowClass = ({ row }) => {
   if (row._dirty) classes.push('dirty-row')
   if (selection.value.some((s) => s.id === row.id)) classes.push('selected-row')
   if (editingRowId.value === row.id) classes.push('editing-row')
+  if ((locateId.value && row.id === locateId.value) || (locateWbs.value && row.wbs === locateWbs.value)) classes.push('locate-row')
   return classes.join(' ')
+}
+
+// 从待办清单跳转：全展开后按 WBS 定位并高亮目标行
+async function locatePlanRow() {
+  const wbs = String(route.query.wbs || '')
+  const id = String(route.query.id || '')
+  if (!wbs && !id) return
+  expandLevel.value = 0
+  locateWbs.value = wbs
+  locateId.value = id
+  await nextTick()
+  leftTable.value?.$el?.querySelector('.locate-row')?.scrollIntoView({ block: 'center' })
+  setTimeout(() => { locateWbs.value = ''; locateId.value = '' }, 8000)
 }
 
 let syncingScroll = false
@@ -668,28 +690,36 @@ const ganttMonths = computed(() => {
   }
   return out
 })
-function ganttBar(row) {
-  const indexOf = (date) => {
-    if (!date) return undefined
-    const hit = ganttIndex.value[date]
-    if (hit !== undefined) return hit
-    const t = new Date(`${date}T00:00:00Z`).getTime()
-    const idx = ganttDays.value.findIndex((c) => t >= c.start.getTime() && t <= c.end.getTime())
-    if (idx >= 0) return idx
-    const first = ganttDays.value[0]
-    const last = ganttDays.value.at(-1)
-    if (!first || !last) return undefined
-    if (t < first.start.getTime()) return 0
-    if (t > last.end.getTime()) return ganttDays.value.length - 1
-    return undefined
-  }
-  const s = indexOf(row.start_date)
-  const e = indexOf(row.end_date)
+function ganttDateIndex(date) {
+  if (!date) return undefined
+  const hit = ganttIndex.value[date]
+  if (hit !== undefined) return hit
+  const t = new Date(`${date}T00:00:00Z`).getTime()
+  const idx = ganttDays.value.findIndex((c) => t >= c.start.getTime() && t <= c.end.getTime())
+  if (idx >= 0) return idx
+  const first = ganttDays.value[0]
+  const last = ganttDays.value.at(-1)
+  if (!first || !last) return undefined
+  if (t < first.start.getTime()) return 0
+  if (t > last.end.getTime()) return ganttDays.value.length - 1
+  return undefined
+}
+function ganttRange(start, end) {
+  if (!start || !end) return null
+  const s = ganttDateIndex(start)
+  const e = ganttDateIndex(end)
   if (s === undefined || e === undefined) return null
   const from = Math.min(s, e)
   const to = Math.max(s, e)
-  return { left: from * cellWidth.value + 2, width: (to - from + 1) * cellWidth.value - 4, days: row.duration || 0 }
+  return { left: from * cellWidth.value + 2, width: (to - from + 1) * cellWidth.value - 4, days: to - from + 1 }
 }
+function ganttBar(row) {
+  const range = ganttRange(row.start_date, row.end_date)
+  if (!range) return null
+  return { ...range, days: row.duration || 0,
+    progress: Math.max(0, Math.min(100, Number(row.completion_rate || 0))) }
+}
+function ganttActualBar(row) { return ganttRange(row.actual_start_date, row.actual_end_date) }
 
 async function loadCalendars() {
   try { calendars.value = await listCalendars() } catch (e) { ElMessage.error(e.message) }
@@ -989,6 +1019,8 @@ function openCard(row) {
     title: shortTaskTitle(row.title), category: row.category || '', status: row.status || '未开始', owner: row.owner || '',
     assistant1: row.assistant1 || '', assistant2: row.assistant2 || '',
     start_date: row.start_date || '', end_date: row.end_date || '',
+    actual_start_date: row.actual_start_date || '', actual_end_date: row.actual_end_date || '',
+    completion_rate: Number(row.completion_rate || 0),
     hours: Number(row.hours || 0), man_days: Number(row.man_days || 0),
     sort: Number(row.sort || 0), note: row.note || '',
     predecessor: Array.isArray(row.predecessor) ? [...row.predecessor] : [],
@@ -1071,7 +1103,11 @@ function commitCell(row, field, value) {
   if (!auth.has('ISSUE_CREATE')) return
   cancelPendingEdit()
   if (field === 'predecessor') row.predecessor = Array.isArray(value) ? [...value] : []
-  else row[field] = value
+  else {
+    if (!row.has_children && field === 'actual_start_date' && value && !row.actual_start_date) row.status = '进行中'
+    if (!row.has_children && field === 'actual_end_date' && value && !row.actual_end_date) row.status = '已解决'
+    row[field] = value
+  }
   row._dirty = true
   editingCell.value = ''
   if (field === 'start_date' || field === 'end_date') rebuild()
@@ -1120,6 +1156,8 @@ function payloadOf(r) {
     status: r.status || '未开始', owner: r.owner || '',
     assistant1: r.assistant1 || '', assistant2: r.assistant2 || '',
     start_date: r.start_date || null, end_date: r.end_date || null,
+    actual_start_date: r.actual_start_date || null, actual_end_date: r.actual_end_date || null,
+    completion_rate: Number(r.completion_rate) || 0,
     hours: Number(r.hours) || 0, man_days: Number(r.man_days) || 0,
     sort: Number(r.sort) || 0, note: r.note || '',
     predecessor: (r.predecessor || []).join(','),
@@ -1155,6 +1193,9 @@ const batchFields = [
   { key: 'assistant2', label: '配合人2' },
   { key: 'start_date', label: '开始时间' },
   { key: 'end_date', label: '完成时间' },
+  { key: 'actual_start_date', label: '实际开始' },
+  { key: 'actual_end_date', label: '实际完成' },
+  { key: 'completion_rate', label: '完成比例' },
   { key: 'note', label: '备注' },
 ]
 const batchOptions = computed(() => {
@@ -1165,15 +1206,22 @@ const batchOptions = computed(() => {
     default: return []
   }
 })
-const batchIsDate = computed(() => ['start_date', 'end_date'].includes(batchField.value))
+const batchIsDate = computed(() => ['start_date', 'end_date', 'actual_start_date', 'actual_end_date'].includes(batchField.value))
 function onBatchFieldChange() { batchValue.value = '' }
 async function applyBatch() {
-  const targets = selection.value.filter((r) => !r._new)
-  if (!targets.length) return ElMessage.warning('请先勾选已保存的计划行')
+  const actualDateField = ['actual_start_date', 'actual_end_date'].includes(batchField.value)
+  const targets = selection.value.filter((r) => !r._new && (!actualDateField || !r.has_children))
+  if (!targets.length) return ElMessage.warning(actualDateField
+    ? '实际日期仅末级任务可填写，请勾选末级任务' : '请先勾选已保存的计划行')
   if (batchValue.value === '' || batchValue.value == null) return ElMessage.warning('请选择或填写目标值')
   batchSaving.value = true
   try {
-    await batchSavePlans(targets.map((r) => payloadOf({ ...r, [batchField.value]: batchValue.value })))
+    await batchSavePlans(targets.map((r) => {
+      const next = { ...r, [batchField.value]: batchValue.value }
+      if (batchField.value === 'actual_end_date' && !r.actual_end_date) next.status = '已解决'
+      else if (batchField.value === 'actual_start_date' && !r.actual_start_date) next.status = '进行中'
+      return payloadOf(next)
+    }))
     ElMessage.success(`已批量更新 ${targets.length} 行（逐行留痕）`)
     batchDialog.value = false
     batchValue.value = ''
@@ -1192,6 +1240,8 @@ async function saveCard() {
   }
   if (!String(form.title || '').trim()) return ElMessage.warning('任务名称必填')
   const oldParentId = editing.value.parent_id || null
+  const hadActualStart = !!editing.value.actual_start_date
+  const hadActualEnd = !!editing.value.actual_end_date
   const parentId = form.parent_id === '__root__' ? null : (form.parent_id || null)
   Object.assign(editing.value, {
     project: form.project,
@@ -1202,11 +1252,17 @@ async function saveCard() {
     category: form.category || '', status: form.status || '未开始', owner: form.owner || '',
     assistant1: form.assistant1 || '', assistant2: form.assistant2 || '',
     start_date: form.start_date || null, end_date: form.end_date || null,
+    actual_start_date: form.actual_start_date || null, actual_end_date: form.actual_end_date || null,
+    completion_rate: Number(form.completion_rate) || 0,
     hours: Number(form.hours) || 0, man_days: Number(form.man_days) || 0,
     sort: Number(form.sort) || 0, note: form.note || '',
     predecessor: [...form.predecessor],
     track: form.track.map((t) => ({ ...t })),
   })
+  if (!editing.value.has_children) {
+    if (!hadActualEnd && editing.value.actual_end_date) editing.value.status = '已解决'
+    else if (!hadActualStart && editing.value.actual_start_date) editing.value.status = '进行中'
+  }
   editing.value._dirty = true
   if (editing.value._new) {
     if (oldParentId !== parentId) moveRowAfterParent(editing.value, parentId)
@@ -1369,8 +1425,19 @@ onMounted(async () => {
   window.addEventListener('resize', updateGridHeight)
   window.addEventListener('keydown', onGlobalKeydown)
   await Promise.all([loadMeta(), loadCalendars()])
+  if (route.query.project) filter.project = String(route.query.project)
   await load()
   bindColumnDrag()
+  await locatePlanRow()
+})
+watch(() => route.query, async (q) => {
+  if (!q.wbs && !q.id) return
+  const nextProject = String(q.project || '')
+  if (nextProject && nextProject !== filter.project) {
+    filter.project = nextProject
+    await load()
+  }
+  await locatePlanRow()
 })
 onUnmounted(() => {
   window.removeEventListener('resize', updateGridHeight)
@@ -1524,6 +1591,23 @@ onUnmounted(() => {
               {{ row[col.key] || '—' }}
             </div>
 
+            <el-date-picker v-else-if="['actual_start_date', 'actual_end_date'].includes(col.key) && isEditing(row, col.key)"
+              v-model="row[col.key]" type="date" value-format="YYYY-MM-DD" size="small" style="width:100%"
+              :disabled="!!row.has_children" @change="commitCell(row, col.key, row[col.key])"
+              @dblclick.stop="openCard(row)" />
+            <div v-else-if="['actual_start_date', 'actual_end_date'].includes(col.key)" class="cell"
+              :class="{ disabled: !!row.has_children }"
+              @click="!row.has_children && startEdit(row, col.key)" @dblclick.stop="openCard(row)">
+              {{ row[col.key] || '—' }}
+            </div>
+
+            <el-input-number v-else-if="col.key === 'completion_rate' && isEditing(row, col.key)"
+              v-model="row.completion_rate" :min="0" :max="100" :precision="1" size="small"
+              controls-position="right" style="width:100%"
+              @change="commitCell(row, col.key, row.completion_rate)" @dblclick.stop="openCard(row)" />
+            <div v-else-if="col.key === 'completion_rate'" class="cell" @click="startEdit(row, col.key)"
+              @dblclick.stop="openCard(row)">{{ row.completion_rate || 0 }}%</div>
+
             <el-select v-else-if="col.key === 'predecessor' && isEditing(row, 'predecessor')"
               v-model="row.predecessor" multiple filterable size="small" style="width:100%"
               @change="commitCell(row, 'predecessor', row.predecessor)"
@@ -1616,8 +1700,12 @@ onUnmounted(() => {
                   <div v-if="ganttBar(row)" class="gantt-bar" :class="{ summary: !!row.has_children }"
                     :style="{ left: `${ganttBar(row).left}px`, width: `${ganttBar(row).width}px` }"
                     :title="`${row.title}：${row.start_date || ''} ~ ${row.end_date || ''}（${ganttBar(row).days} 个工作日）`">
+                    <div class="gantt-bar-progress" :style="{ width: `${ganttBar(row).progress}%` }" />
                     <span class="gantt-bar-label">{{ shortTaskTitle(row.title) }}</span>
                   </div>
+                  <div v-if="ganttActualBar(row)" class="gantt-actual-bar"
+                    :style="{ left: `${ganttActualBar(row).left}px`, width: `${ganttActualBar(row).width}px` }"
+                    :title="`实际：${row.actual_start_date} ~ ${row.actual_end_date}（完成 ${row.completion_rate || 0}%）`" />
                 </div>
               </div>
             </div>
@@ -1711,6 +1799,18 @@ onUnmounted(() => {
               <el-date-picker v-model="form.end_date" type="date" value-format="YYYY-MM-DD" style="width:100%"
                 :disabled="rolledUp" :cell-class-name="planDateCellClass" />
             </el-form-item>
+            <el-form-item label="实际开始">
+              <el-date-picker v-model="form.actual_start_date" type="date" value-format="YYYY-MM-DD"
+                style="width:100%" :disabled="rolledUp" />
+            </el-form-item>
+            <el-form-item label="实际完成">
+              <el-date-picker v-model="form.actual_end_date" type="date" value-format="YYYY-MM-DD"
+                style="width:100%" :disabled="rolledUp" />
+            </el-form-item>
+            <el-form-item label="完成比例">
+              <el-input-number v-model="form.completion_rate" :min="0" :max="100" :precision="1"
+                style="width:100%" />
+            </el-form-item>
             <el-form-item label="工期">
               <el-input :model-value="`${workDays(form.start_date, form.end_date)} 个工作日`" disabled />
             </el-form-item>
@@ -1722,7 +1822,7 @@ onUnmounted(() => {
               <el-input-number v-model="form.man_days" :min="0" :step="0.5" style="width:100%"
                 :disabled="rolledUp || autoCalc" />
             </el-form-item>
-            <div v-if="rolledUp" class="hint">该任务有下级，时间/工时/人天由下级自动汇总。</div>
+            <div v-if="rolledUp" class="hint">该任务有下级，时间/实际日期/工时/人天由下级自动汇总。</div>
             <div v-else-if="autoCalc" class="hint">已按日历根据起止日期自动计算工时与人天。</div>
           </el-form>
         </el-card>
@@ -1950,6 +2050,11 @@ onUnmounted(() => {
 :deep(.plan-table .el-table__fixed-right tr.dirty-row > td.el-table__cell) {
   background: color-mix(in srgb, var(--el-color-warning) 16%, var(--el-bg-color)) !important;
 }
+:deep(.plan-table tr.locate-row > td.el-table__cell),
+:deep(.plan-table .el-table__fixed-left tr.locate-row > td.el-table__cell),
+:deep(.plan-table .el-table__fixed-right tr.locate-row > td.el-table__cell) {
+  background: color-mix(in srgb, var(--el-color-warning) 24%, var(--el-bg-color)) !important;
+}
 :deep(.plan-table tr.selected-row > td.el-table__cell),
 :deep(.plan-table .el-table__fixed-left tr.selected-row > td.el-table__cell),
 :deep(.plan-table .el-table__fixed-right tr.selected-row > td.el-table__cell) {
@@ -2010,8 +2115,12 @@ onUnmounted(() => {
 .gantt-bar { position: absolute; top: 9px; height: 16px; border-radius: 8px; overflow: hidden;
   background: var(--el-color-primary); opacity: 0.92; }
 .gantt-bar.summary { background: var(--el-color-success); }
-.gantt-bar-label { display: block; max-width: 100%; padding: 0 6px; color: #fff; font-size: 10px;
-  line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gantt-bar-progress { position: absolute; inset: 0 auto 0 0;
+  background: color-mix(in srgb, #000 26%, transparent); border-radius: 8px 0 0 8px; }
+.gantt-bar-label { position: relative; z-index: 1; display: block; max-width: 100%; padding: 0 6px; color: #fff;
+  font-size: 10px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gantt-actual-bar { position: absolute; top: 26px; height: 5px; border-radius: 3px;
+  background: var(--el-color-warning); opacity: 0.95; }
 .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .edit-card .el-form-item { margin-bottom: 12px; }
 .span-2 { grid-column: 1 / -1; }

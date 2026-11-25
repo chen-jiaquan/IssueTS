@@ -22,3 +22,19 @@ export const defaultUserPasswordRules = [
     .withMessage('默认密码须为 6~64 位字符串'),
   ...settingProjectsRules,
 ]
+
+// 系统设置：待办完成时间窗口（不晚于今天 + N 天，N=0 表示仅今天及逾期）
+export const todoDueDaysRules = [
+  body('value')
+    .isInt({ min: 0, max: 365 })
+    .withMessage('完成时间窗口须为 0~365 的整数')
+    .toInt(),
+  ...settingProjectsRules,
+]
+
+// 系统设置：进入待办清单的状态白名单
+export const todoStatusesRules = [
+  body('value').isArray({ min: 1, max: 32 }).withMessage('状态须为非空数组'),
+  body('value.*').isString().trim().notEmpty().isLength({ max: 32 }).withMessage('状态值非法'),
+  ...settingProjectsRules,
+]

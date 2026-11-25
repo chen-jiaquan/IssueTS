@@ -9,6 +9,10 @@ export const ISSUE_EXPORT_LIMIT_KEY = 'issue_export_limit'
 export const DEFAULT_ISSUE_EXPORT_LIMIT = 0 // 0=不限制
 export const DEFAULT_USER_PASSWORD_KEY = 'default_user_password'
 export const DEFAULT_USER_PASSWORD = 'Issue@2026' // 人员下推用户时的初始密码（可在系统设置修改）
+export const TODO_DUE_DAYS_KEY = 'todo_due_days'
+export const DEFAULT_TODO_DUE_DAYS = 7 // 待办完成时间窗口：不晚于今天 + N 天（含逾期）
+export const TODO_STATUSES_KEY = 'todo_statuses'
+export const DEFAULT_TODO_STATUSES = ['未开始', '进行中', '暂停'] // 进入待办清单的状态白名单
 
 const SETTING_COLS = 'id, setting_key AS key, projects, value'
 const normalizeCodes = (v) => {
@@ -101,12 +105,48 @@ function parsePassword(raw) {
   return typeof raw === 'string' && raw.length >= 6 ? raw : DEFAULT_USER_PASSWORD
 }
 
+function parseTodoDays(raw) {
+  const value = Number(raw)
+  return Number.isInteger(value) && value >= 0 && value <= 365 ? value : DEFAULT_TODO_DUE_DAYS
+}
+
+function parseTodoStatuses(raw) {
+  try {
+    const value = JSON.parse(raw)
+    if (Array.isArray(value) && value.length && value.every((v) => typeof v === 'string' && v.trim())) {
+      return [...new Set(value.map((v) => v.trim()))]
+    }
+  } catch { /* 回退默认值 */ }
+  return [...DEFAULT_TODO_STATUSES]
+}
+
 export async function getIssueExportLimit(projects, scope, req) {
   return resolveValue(ISSUE_EXPORT_LIMIT_KEY, projects, DEFAULT_ISSUE_EXPORT_LIMIT, parseLimit, scope, req)
 }
 
 export async function getDefaultUserPassword(projects, scope, req) {
   return resolveValue(DEFAULT_USER_PASSWORD_KEY, projects, DEFAULT_USER_PASSWORD, parsePassword, scope, req)
+}
+
+export async function getTodoDueDays(projects, scope, req) {
+  return resolveValue(TODO_DUE_DAYS_KEY, projects, DEFAULT_TODO_DUE_DAYS, parseTodoDays, scope, req)
+}
+
+export async function getTodoStatuses(projects, scope, req) {
+  return resolveValue(TODO_STATUSES_KEY, projects, DEFAULT_TODO_STATUSES, parseTodoStatuses, scope, req)
+}
+
+// 聚合待办跨越多个项目：一次解析出各项目的规则（具体项目 > ALL > 全局 > 默认值）。
+export async function getTodoRulesMap(codes = []) {
+  const [dayRows, statusRows] = await Promise.all([rowsOf(TODO_DUE_DAYS_KEY), rowsOf(TODO_STATUSES_KEY)])
+  const resolve = (rows, code, parse, fallback) => parse(pickRow(rows, code ? [code] : [], null, true)?.value, fallback)
+  const days = { '*': resolve(dayRows, '', parseTodoDays, DEFAULT_TODO_DUE_DAYS) }
+  const statuses = { '*': resolve(statusRows, '', parseTodoStatuses, DEFAULT_TODO_STATUSES) }
+  for (const code of [...new Set(codes.filter(Boolean))]) {
+    days[code] = resolve(dayRows, code, parseTodoDays, days['*'])
+    statuses[code] = resolve(statusRows, code, parseTodoStatuses, statuses['*'])
+  }
+  return { days, statuses }
 }
 
 export const listSettingItems = async () =>
@@ -152,3 +192,9 @@ export const setIssueExportLimit = (value, { projects, id, req } = {}) =>
 
 export const setDefaultUserPassword = (value, { projects, id, req } = {}) =>
   upsertSetting(req, DEFAULT_USER_PASSWORD_KEY, value, projects, id)
+
+export const setTodoDueDays = (value, { projects, id, req } = {}) =>
+  upsertSetting(req, TODO_DUE_DAYS_KEY, value, projects, id)
+
+export const setTodoStatuses = (value, { projects, id, req } = {}) =>
+  upsertSetting(req, TODO_STATUSES_KEY, JSON.stringify(value), projects, id)

@@ -26,3 +26,9 @@ export const putIssueExportLimit = (value, projects) =>
 export const getDefaultUserPassword = (project) => http.get('/config/settings/default-user-password', projectParams(project))
 export const putDefaultUserPassword = (value, projects) =>
   http.put('/config/settings/default-user-password', { value, projects })
+export const getTodoDueDays = (project) => http.get('/config/settings/todo-due-days', projectParams(project))
+export const putTodoDueDays = (value, projects) =>
+  http.put('/config/settings/todo-due-days', { value, projects })
+export const getTodoStatuses = (project) => http.get('/config/settings/todo-statuses', projectParams(project))
+export const putTodoStatuses = (value, projects) =>
+  http.put('/config/settings/todo-statuses', { value, projects })

@@ -55,6 +55,7 @@ export const todoBody = [
 export const aggregateTodoQuery = [
   query('owner').optional().isString().trim().notEmpty(),
   query('type').optional().isIn(['问题', '计划', '手工']),
+  query('project').optional().isString().trim().notEmpty(),
 ]
 
 export const idParam = param('id').isString().trim().notEmpty()

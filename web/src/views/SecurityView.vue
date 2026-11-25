@@ -10,6 +10,7 @@ import {
   listUsers, createUser, updateUser, deleteUser,
   listRoles, listPermissions, updatePermission, getRolePerms, putRolePerms,
   getIssueExportLimit, putIssueExportLimit, getDefaultUserPassword, putDefaultUserPassword,
+  getTodoDueDays, putTodoDueDays, getTodoStatuses, putTodoStatuses,
 } from '@/api/security'
 import {
   createRole, updateRole, deleteRole, listAlertRules, putAlertRule,
@@ -371,13 +372,24 @@ const exportLimit = ref(0)
 const defaultPassword = ref('')
 const settingsSaving = ref(false)
 const passwordSaving = ref(false)
+const todoDueDays = ref(7)
+const todoStatuses = ref([])
+const todoStatusOptions = ref([])
+const todoDaysSaving = ref(false)
+const todoStatusesSaving = ref(false)
 
 async function loadSettings() {
   if (!canSettings) return
   const projects = settingsTargetProjects.value
-  const [limit, password] = await Promise.all([getIssueExportLimit(projects), getDefaultUserPassword(projects)])
+  const [limit, password, days, statuses, cfg] = await Promise.all([
+    getIssueExportLimit(projects), getDefaultUserPassword(projects),
+    getTodoDueDays(projects), getTodoStatuses(projects), http.get('/config/fields'),
+  ])
   exportLimit.value = limit
   defaultPassword.value = password
+  todoDueDays.value = days
+  todoStatuses.value = statuses
+  todoStatusOptions.value = (cfg.dicts?.status || []).map((s) => s.value)
 }
 
 function checkSettingsTarget() {
@@ -424,6 +436,40 @@ async function saveDefaultPassword() {
     ElMessage.error(e.message)
   } finally {
     passwordSaving.value = false
+  }
+}
+
+async function saveTodoDueDays() {
+  const value = Number(todoDueDays.value)
+  if (!Number.isInteger(value) || value < 0 || value > 365) {
+    return ElMessage.warning('完成时间窗口须为 0~365 的整数')
+  }
+  if (!checkSettingsTarget()) return
+  todoDaysSaving.value = true
+  try {
+    await putTodoDueDays(value, settingsTargetProjects.value)
+    ElMessage.success(`${settingsScopeLabel.value}：待办完成时间窗口已保存`)
+    await loadSettings()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    todoDaysSaving.value = false
+  }
+}
+
+async function saveTodoStatuses() {
+  const value = todoStatuses.value
+  if (!Array.isArray(value) || !value.length) return ElMessage.warning('请至少选择一种状态')
+  if (!checkSettingsTarget()) return
+  todoStatusesSaving.value = true
+  try {
+    await putTodoStatuses(value, settingsTargetProjects.value)
+    ElMessage.success(`${settingsScopeLabel.value}：待办状态范围已保存`)
+    await loadSettings()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    todoStatusesSaving.value = false
   }
 }
 
@@ -769,7 +815,7 @@ onBeforeUnmount(() => {
       <!-- ========== 系统设置 ========== -->
       <el-tab-pane v-if="canSettings" label="系统设置" name="settings">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
-          title="导出上限控制问题列表导出行数；默认密码用于人员档案自动下推生成的用户账号初始密码。" />
+          title="导出上限控制问题列表导出行数；默认密码用于人员档案自动下推生成的用户账号初始密码；待办规则控制待办清单的完成时间窗口与状态范围。" />
         <div class="toolbar">
           <el-select v-model="settingsProjectFilter" multiple collapse-tags clearable placeholder="按项目过滤设置" style="width:260px"
             @change="loadSettings">
@@ -802,6 +848,30 @@ onBeforeUnmount(() => {
           <el-form-item>
             <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="passwordSaving"
               @click="saveDefaultPassword">保存默认密码</el-button>
+          </el-form-item>
+          <el-form-item label="待办完成时间">
+            <div style="display:flex; align-items:center; gap:12px; width:100%">
+              <el-input-number v-model="todoDueDays" :min="0" :max="365" :step="1"
+                :disabled="settingsFieldsDisabled" controls-position="right" style="width: 220px" />
+              <span class="tip">完成日期不晚于今天 + N 天（含逾期），0 = 仅今天及逾期</span>
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="todoDaysSaving"
+              @click="saveTodoDueDays">保存待办完成时间</el-button>
+          </el-form-item>
+          <el-form-item label="待办状态范围">
+            <div style="display:flex; align-items:center; gap:12px; width:100%">
+              <el-select v-model="todoStatuses" multiple collapse-tags clearable filterable
+                :disabled="settingsFieldsDisabled" placeholder="选择进入待办的状态" style="width: 220px">
+                <el-option v-for="s in todoStatusOptions" :key="s" :value="s" :label="s" />
+              </el-select>
+              <span class="tip">仅所选状态的问题与计划进入待办清单</span>
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :disabled="settingsFieldsDisabled" :loading="todoStatusesSaving"
+              @click="saveTodoStatuses">保存待办状态</el-button>
           </el-form-item>
         </el-form>
       </el-tab-pane>
